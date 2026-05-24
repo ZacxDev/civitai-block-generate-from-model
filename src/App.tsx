@@ -14,6 +14,7 @@ import type {
   BlockContext,
   BlockWorkflowSnapshot,
   ModelSlotContext,
+  ShowcaseImage,
   WorkflowStatus,
 } from '@civitai/app-sdk/blocks';
 
@@ -34,7 +35,7 @@ import type {
 export function App() {
   const { ready, context, viewer, theme } = useBlockContext();
   const settings = useBlockSettings();
-  const { submit, poll, status, result, error } = useBuzzWorkflow();
+  const { submit, estimate, poll, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
   const checkpointPicker = useCheckpointPicker();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -47,6 +48,17 @@ export function App() {
   const [localCheckpoint, setLocalCheckpoint] = useState<BlockCheckpointInfo | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Selected showcase image index. Drives the prompt + gen params for
+  // submit/estimate. Defaults to 0 in the carousel-mount effect below
+  // (deferred because BlockInit might land before showcaseImages does).
+  const [selectedShowcaseIdx, setSelectedShowcaseIdx] = useState<number | null>(null);
+  // Estimated cost (yellow buzz) for the current params. Pulled from
+  // estimate() snapshot, refreshed on mount + when the model identity
+  // (checkpoint or selected showcase) changes.
+  const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
+  const [estimateError, setEstimateError] = useState<string | null>(null);
+  const estimateInFlightRef = useRef(0);
 
   // useBuzzWorkflow().submit() returns the initial snapshot but the hook
   // doesn't auto-poll — it's the caller's job to drive poll(workflowId)
@@ -115,6 +127,77 @@ export function App() {
       }
     };
   }, [status, result?.workflowId, poll]);
+
+  // Derive showcase/checkpoint via a partial cast so we can run the
+  // mount-defaults + auto-estimate effects unconditionally above the
+  // early returns. Effects can't sit below them or React will complain
+  // about hook order on the !ready re-render.
+  const modelCtxRead = context as Partial<ModelSlotContext>;
+  const showcaseImages: ShowcaseImage[] = modelCtxRead.showcaseImages ?? [];
+  const selectedShowcase =
+    selectedShowcaseIdx != null ? showcaseImages[selectedShowcaseIdx] ?? null : null;
+  const effectiveCheckpointVersionIdForEstimate =
+    (localCheckpoint ?? modelCtxRead.checkpoint ?? null)?.versionId ?? null;
+
+  // Default-select the first showcase image once the host's query lands
+  // (showcaseImages may be empty on first render and populate later when
+  // BLOCK_INIT delivers them).
+  useEffect(() => {
+    if (selectedShowcaseIdx != null) return;
+    if (showcaseImages.length === 0) return;
+    setSelectedShowcaseIdx(0);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showcaseImages.length]);
+
+  // Populate the prompt input from the selected showcase image's meta.
+  // The user can still edit afterward — this only fires on showcase
+  // selection change, not every render. Empty meta leaves the input
+  // alone so a partial-meta showcase doesn't clobber a typed prompt.
+  useEffect(() => {
+    if (selectedShowcase?.prompt) {
+      setPrompt(selectedShowcase.prompt);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedShowcaseIdx]);
+
+  // Auto-estimate on mount + whenever the model identity changes
+  // (checkpoint swap, or showcase pick — both change cost via the
+  // resolved params). NOT debounced on prompt edits: prompt length
+  // doesn't move cost enough to be worth a round-trip per keystroke.
+  useEffect(() => {
+    const modelId = modelCtxRead.modelId;
+    const modelVersionId = modelCtxRead.modelVersionId;
+    if (!modelId || !modelVersionId) return;
+    if (!effectiveCheckpointVersionIdForEstimate) return;
+    // Race guard — if a faster query lands while a slower one is in
+    // flight, only the latest result wins.
+    const myId = ++estimateInFlightRef.current;
+    estimate({
+      kind: 'textToImage',
+      modelId,
+      modelVersionId,
+      params: buildSubmitParams(prompt, '' /* suffix */, selectedShowcase),
+    })
+      .then((snap) => {
+        if (myId !== estimateInFlightRef.current) return;
+        const cost = snap.cost?.total;
+        setEstimatedCost(typeof cost === 'number' ? cost : null);
+        setEstimateError(null);
+      })
+      .catch((err) => {
+        if (myId !== estimateInFlightRef.current) return;
+        setEstimateError(err instanceof Error ? err.message : 'estimate failed');
+        setEstimatedCost(null);
+      });
+    // Intentionally narrow deps: re-estimate on checkpoint OR showcase
+    // change, NOT on prompt edits.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [
+    modelCtxRead.modelId,
+    modelCtxRead.modelVersionId,
+    effectiveCheckpointVersionIdForEstimate,
+    selectedShowcaseIdx,
+  ]);
 
   if (!ready) {
     return (
@@ -201,16 +284,15 @@ export function App() {
   const isBusy = busy.includes(status);
 
   const handleGenerate = async () => {
-    const fullPrompt = [prompt, suffix].filter(Boolean).join(', ').trim();
     try {
       await submit({
         kind: 'textToImage',
         modelId: model.modelId,
         modelVersionId: model.modelVersionId,
-        params: {
-          prompt: fullPrompt,
-          quantity: 1,
-        },
+        // Use the same param-builder as the estimate effect so cost shown
+        // pre-click matches cost charged at submit. The host still
+        // re-validates everything server-side; this is just for parity.
+        params: buildSubmitParams(prompt, suffix, selectedShowcase),
       });
     } catch {
       // Surface via `error` in render; nothing to do here.
@@ -258,6 +340,28 @@ export function App() {
         <p style={errorTextStyle}>Checkpoint: {checkpointError}</p>
       )}
 
+      {showcaseImages.length > 0 && (
+        <div>
+          <p style={{ ...subtleStyle, marginBottom: 6 }}>
+            Remix from a preview image:
+          </p>
+          <div style={carouselStyle}>
+            {showcaseImages.map((img, idx) => (
+              <button
+                key={img.id}
+                type="button"
+                aria-label={`Pick preview ${idx + 1}`}
+                onClick={() => setSelectedShowcaseIdx(idx)}
+                disabled={isBusy}
+                style={thumbButtonStyle(idx === selectedShowcaseIdx, theme)}
+              >
+                <img src={img.url} alt="" style={thumbImageStyle} loading="lazy" />
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <input
           aria-label="Prompt (optional)"
@@ -270,13 +374,21 @@ export function App() {
 
         {showAdvanced && <p style={subtleStyle}>(advanced controls — TODO)</p>}
 
+        {(estimatedCost != null || estimateError) && (
+          <p style={subtleStyle}>
+            {estimateError
+              ? `Couldn't estimate cost: ${estimateError}`
+              : `Estimated cost: ${estimatedCost} Buzz (budget: ${budget})`}
+          </p>
+        )}
+
         <button
           type="button"
           onClick={handleGenerate}
           disabled={isBusy}
           style={primaryButtonStyle()}
         >
-          {labelForStatus(status, budget)}
+          {labelForStatus(status, budget, estimatedCost)}
         </button>
       </div>
 
@@ -348,7 +460,11 @@ function Result({ snapshot }: { snapshot: BlockWorkflowSnapshot }) {
   );
 }
 
-function labelForStatus(status: WorkflowStatus, budget: number): string {
+function labelForStatus(
+  status: WorkflowStatus,
+  budget: number,
+  estimatedCost: number | null
+): string {
   switch (status) {
     case 'estimating':
       return 'Estimating cost…';
@@ -359,8 +475,51 @@ function labelForStatus(status: WorkflowStatus, budget: number): string {
     case 'polling':
       return 'Generating…';
     default:
-      return `Generate (≤ ${budget} Buzz)`;
+      // Show actual estimate when we have one; fall back to budget cap.
+      return estimatedCost != null
+        ? `Generate (${estimatedCost} Buzz)`
+        : `Generate (≤ ${budget} Buzz)`;
   }
+}
+
+/**
+ * Build the params block for submit/estimate. Mirrors the showcase
+ * image's gen meta where present, with null fields dropped (the host
+ * fills sensible defaults). The user's typed prompt always wins over
+ * the showcase's prompt; falls back to the showcase prompt only when
+ * the user hasn't typed anything.
+ */
+function buildSubmitParams(
+  userPrompt: string,
+  suffix: string,
+  selected: ShowcaseImage | null
+): {
+  prompt: string;
+  negativePrompt?: string;
+  cfgScale?: number;
+  steps?: number;
+  seed?: number;
+  sampler?: string;
+  width?: number;
+  height?: number;
+  quantity: number;
+} {
+  const userPart = userPrompt.trim();
+  const composed =
+    userPart.length > 0
+      ? [userPart, suffix].filter(Boolean).join(', ').trim()
+      : selected?.prompt ?? '';
+  return {
+    prompt: composed,
+    ...(selected?.negativePrompt ? { negativePrompt: selected.negativePrompt } : {}),
+    ...(selected?.cfgScale != null ? { cfgScale: selected.cfgScale } : {}),
+    ...(selected?.steps != null ? { steps: selected.steps } : {}),
+    ...(selected?.seed != null ? { seed: selected.seed } : {}),
+    ...(selected?.sampler ? { sampler: selected.sampler } : {}),
+    ...(selected?.width ? { width: selected.width } : {}),
+    ...(selected?.height ? { height: selected.height } : {}),
+    quantity: 1,
+  };
 }
 
 function asModelContext(ctx: BlockContext): ModelSlotContext | null {
@@ -422,6 +581,32 @@ const checkpointRowStyle = (theme: string | null): CSSProperties => ({
   background: theme === 'dark' ? '#1f2937' : '#f3f4f6',
   fontSize: 13,
 });
+
+const carouselStyle: CSSProperties = {
+  display: 'flex',
+  gap: 6,
+  flexWrap: 'wrap',
+};
+
+const thumbButtonStyle = (selected: boolean, theme: string | null): CSSProperties => ({
+  padding: 0,
+  border: `2px solid ${selected ? '#3b82f6' : theme === 'dark' ? '#374151' : '#d1d5db'}`,
+  borderRadius: 6,
+  background: 'transparent',
+  cursor: 'pointer',
+  overflow: 'hidden',
+  // Slightly larger when selected so the highlight is visible without
+  // shifting layout — the border itself is the primary indicator.
+  outline: selected ? '1px solid #60a5fa' : 'none',
+  outlineOffset: 1,
+});
+
+const thumbImageStyle: CSSProperties = {
+  display: 'block',
+  width: 64,
+  height: 64,
+  objectFit: 'cover',
+};
 
 const subtleStyle: CSSProperties = {
   opacity: 0.7,
