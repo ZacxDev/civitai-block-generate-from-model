@@ -90,12 +90,12 @@ export function App() {
     try {
       await submit({
         kind: 'textToImage',
+        modelId: model.modelId,
         modelVersionId: model.modelVersionId,
-        prompt: fullPrompt,
-        // Platform enforces `cost <= claims.buzzBudget` regardless of what we
-        // send here. The block-scoped JWT carries the budget; the requested
-        // amount is informational — the host clips and returns the actual cost.
-        maxBuzz: budget,
+        params: {
+          prompt: fullPrompt,
+          quantity: 1,
+        },
       });
     } catch {
       // Surface via `error` in render; nothing to do here.
