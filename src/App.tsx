@@ -412,19 +412,20 @@ export function App() {
         </div>
       )}
 
-      {result && (result.status === 'pending' || result.status === 'processing') && (
-        <p style={subtleStyle}>
-          {result.status === 'pending' ? 'Queued…' : 'Generating…'}
-        </p>
-      )}
+      {/* Gate the intermediate-state label on hook status === 'polling',
+          not just snapshot status: the SDK leaves `result` populated with
+          the estimate's snapshot (status: 'pending') even before submit,
+          which would otherwise show "Queued…" with nothing actually
+          queued. 'polling' only sets after submit() returns. */}
+      {status === 'polling' &&
+        result &&
+        (result.status === 'pending' || result.status === 'processing') && (
+          <p style={subtleStyle}>
+            {result.status === 'pending' ? 'Queued…' : 'Generating…'}
+          </p>
+        )}
 
-      {result && result.status === 'succeeded' && (
-        <Result snapshot={result} />
-      )}
-
-      <footer style={footerStyle}>
-        Powered by <strong>Civitai App Blocks</strong>
-      </footer>
+      {result && result.status === 'succeeded' && <Result snapshot={result} />}
     </div>
   );
 }
@@ -676,9 +677,3 @@ const imageStyle: CSSProperties = {
   marginBottom: 8,
 };
 
-const footerStyle: CSSProperties = {
-  fontSize: 11,
-  opacity: 0.5,
-  textAlign: 'center',
-  marginTop: 8,
-};
