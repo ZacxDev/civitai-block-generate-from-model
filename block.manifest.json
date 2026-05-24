@@ -1,0 +1,52 @@
+{
+  "$schema": "https://civitai.com/schemas/app-block/v1.json",
+  "appId": "${CIVITAI_APP_ID}",
+  "blockId": "generate-from-model",
+  "version": "0.1.0",
+  "name": "Generate from this model",
+  "description": "One-tap generation widget that drops onto a model page sidebar. No prompt-craft required: pre-loaded with the page's model, just hit Generate.",
+  "type": "block",
+  "targets": [
+    {
+      "slotId": "model.sidebar_top",
+      "priority": 100,
+      "requiredContext": ["modelId", "modelVersionId"]
+    }
+  ],
+  "scopes": [
+    "models:read:self",
+    "ai:write:budgeted",
+    "buzz:read"
+  ],
+  "settings": {
+    "buzz_budget_per_gen": {
+      "type": "number",
+      "label": "Max Buzz per generation",
+      "default": 10,
+      "min": 1,
+      "max": 500,
+      "description": "Hard cap enforced by the platform. Buzz that exceeds this is rejected before the workflow runs."
+    },
+    "default_prompt_suffix": {
+      "type": "string",
+      "label": "Default prompt suffix (optional)",
+      "default": "",
+      "description": "Appended to the user's prompt automatically. Useful for setting style hints (e.g., 'masterpiece, best quality, detailed')."
+    },
+    "show_advanced": {
+      "type": "boolean",
+      "label": "Show advanced controls",
+      "default": false,
+      "description": "Reveal seed, sampler, and step controls. Off by default for the one-tap UX."
+    }
+  },
+  "iframe": {
+    "src": "https://blocks-pr2319.civitaic.com/generate-from-model/",
+    "minHeight": 240,
+    "maxHeight": 800,
+    "resizable": true,
+    "sandbox": "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
+  },
+  "contentRating": "pg",
+  "minApiVersion": "1.0"
+}

@@ -1,0 +1,41 @@
+{
+  "name": "civitai-block-generate-from-model",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Civitai App Block — 'Generate from this model'. One-tap generation widget that embeds on the model.sidebar_top slot.",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "civitai",
+    "civitai-app-block",
+    "generate-from-model"
+  ],
+  "homepage": "https://github.com/ZacxDev/civitai-block-generate-from-model#readme",
+  "bugs": "https://github.com/ZacxDev/civitai-block-generate-from-model/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ZacxDev/civitai-block-generate-from-model.git"
+  },
+  "scripts": {
+    "dev": "vite",
+    "dev:harness": "VITE_DEV_HARNESS=true vite",
+    "build": "vite build",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "preview": "vite preview",
+    "docker:build": "docker build -t ghcr.io/zacxdev/civitai-block-generate-from-model:latest ."
+  },
+  "dependencies": {
+    "@civitai/app-sdk": "file:./vendor/civitai-app-sdk-0.2.0.tgz",
+    "@civitai/blocks-react": "file:./vendor/civitai-blocks-react-0.0.0.tgz",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "@types/react": "^19.2.15",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.4.0",
+    "typescript": "^5.9.2",
+    "vite": "^7.2.0"
+  }
+}
