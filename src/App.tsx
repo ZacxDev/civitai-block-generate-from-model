@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 
 import {
@@ -34,7 +34,7 @@ import type {
 export function App() {
   const { ready, context, viewer, theme } = useBlockContext();
   const settings = useBlockSettings();
-  const { submit, status, result, error } = useBuzzWorkflow();
+  const { submit, poll, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
   const checkpointPicker = useCheckpointPicker();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -46,6 +46,75 @@ export function App() {
   // time anyway — this is just for the label-in-the-header.
   const [localCheckpoint, setLocalCheckpoint] = useState<BlockCheckpointInfo | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
+  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // useBuzzWorkflow().submit() returns the initial snapshot but the hook
+  // doesn't auto-poll — it's the caller's job to drive poll(workflowId)
+  // until a terminal status. Without this effect the block sits at
+  // status='polling' with the initial 'pending' snapshot forever.
+  //
+  // The hook flips status out of 'polling' itself when a terminal-status
+  // snapshot lands, so the dep array catches the transition and the
+  // cleanup tears the timer down.
+  useEffect(() => {
+    if (status !== 'polling') return;
+    const workflowId = result?.workflowId;
+    if (!workflowId) return;
+
+    // Adaptive backoff. Cached Flux returns in <10s; cold paths take
+    // 30-60s. Fast initial polls catch the cached case quickly, then
+    // back off so a long-running cold workflow doesn't hammer the host.
+    const SCHEDULE_MS = [2000, 2000, 3000, 5000, 8000];
+    let attempt = 0;
+    let cancelled = false;
+
+    const tick = async () => {
+      if (cancelled) return;
+      // Don't burn poll budget while the tab is hidden — the
+      // visibilitychange listener re-arms when the user comes back.
+      if (typeof document !== 'undefined' && document.hidden) {
+        pollTimerRef.current = null;
+        return;
+      }
+      try {
+        await poll(workflowId);
+      } catch {
+        // Transient host/orchestrator errors during polling — keep going.
+        // The hook flips status to 'error' on its own only after the
+        // workflow itself reaches a terminal failure; mid-poll
+        // network/5xx hiccups are recoverable.
+      }
+      if (cancelled) return;
+      const delay = SCHEDULE_MS[Math.min(attempt, SCHEDULE_MS.length - 1)];
+      attempt += 1;
+      pollTimerRef.current = setTimeout(tick, delay);
+    };
+
+    // Leading edge — fire immediately so a workflow that's already
+    // succeeded by the time submit() returns gets its result on the
+    // next microtask.
+    pollTimerRef.current = setTimeout(tick, 0);
+
+    const onVisibility = () => {
+      if (cancelled || document.hidden) return;
+      // Resume only when no timer is armed (the tick handler nulled it
+      // out when it bailed on the hidden check). Avoids double-firing
+      // if the visibilitychange races with a scheduled tick.
+      if (pollTimerRef.current == null) {
+        pollTimerRef.current = setTimeout(tick, 0);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      cancelled = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      if (pollTimerRef.current != null) {
+        clearTimeout(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, [status, result?.workflowId, poll]);
 
   if (!ready) {
     return (
@@ -226,6 +295,12 @@ export function App() {
             </button>
           )}
         </div>
+      )}
+
+      {result && (result.status === 'pending' || result.status === 'processing') && (
+        <p style={subtleStyle}>
+          {result.status === 'pending' ? 'Queued…' : 'Generating…'}
+        </p>
       )}
 
       {result && result.status === 'succeeded' && (
