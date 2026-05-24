@@ -280,7 +280,10 @@ export function App() {
     }
   };
 
-  const busy: WorkflowStatus[] = ['estimating', 'confirming', 'submitting', 'polling'];
+  // `confirming` is "estimate landed, user reviewing cost" — Generate must
+  // stay clickable in that state, otherwise auto-estimate on mount locks
+  // the button forever. SDK transitions confirming → submitting on click.
+  const busy: WorkflowStatus[] = ['estimating', 'submitting', 'polling'];
   const isBusy = busy.includes(status);
 
   const handleGenerate = async () => {
