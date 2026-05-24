@@ -468,17 +468,23 @@ function labelForStatus(
   budget: number,
   estimatedCost: number | null
 ): string {
+  // SDK status semantics:
+  //   estimating  — cost lookup in flight (busy)
+  //   confirming  — cost computed, awaiting USER click (idle; show Generate)
+  //   submitting  — submit() in flight (busy)
+  //   polling     — workflow running server-side (busy)
+  //   idle / done / error → also idle (show Generate)
   switch (status) {
     case 'estimating':
       return 'Estimating cost…';
-    case 'confirming':
-      return 'Confirming…';
     case 'submitting':
       return 'Submitting…';
     case 'polling':
       return 'Generating…';
     default:
-      // Show actual estimate when we have one; fall back to budget cap.
+      // idle, confirming, done, error: the button is actionable. Show
+      // the actual estimated cost when we have one, fall back to the
+      // budget cap otherwise.
       return estimatedCost != null
         ? `Generate (${estimatedCost} Buzz)`
         : `Generate (≤ ${budget} Buzz)`;
