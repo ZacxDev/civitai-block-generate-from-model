@@ -10,7 +10,7 @@ COPY vendor/ ./vendor/
 RUN npm ci || npm install
 
 # Build
-COPY tsconfig.json vite.config.ts index.html ./
+COPY tsconfig.json vite.config.ts index.html .env.production ./
 COPY src/ ./src/
 COPY block.manifest.json civitai.app.json ./
 RUN npm run build
