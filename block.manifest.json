@@ -16,7 +16,7 @@
   "scopes": [
     "models:read:self",
     "ai:write:budgeted",
-    "buzz:read"
+    "buzz:read:self"
   ],
   "settings": {
     "buzz_budget_per_gen": {
