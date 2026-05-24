@@ -7,8 +7,10 @@ import {
   useBlockSettings,
   useBuzzPurchase,
   useBuzzWorkflow,
+  useCheckpointPicker,
 } from '@civitai/blocks-react';
 import type {
+  BlockCheckpointInfo,
   BlockContext,
   BlockWorkflowSnapshot,
   ModelSlotContext,
@@ -34,10 +36,16 @@ export function App() {
   const settings = useBlockSettings();
   const { submit, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
+  const checkpointPicker = useCheckpointPicker();
   const rootRef = useRef<HTMLDivElement>(null);
   useBlockResize(rootRef);
 
   const [prompt, setPrompt] = useState('');
+  // Mirror the host-supplied checkpoint locally so the UI updates the
+  // instant the user picks a new one. The host re-resolves at submit
+  // time anyway — this is just for the label-in-the-header.
+  const [localCheckpoint, setLocalCheckpoint] = useState<BlockCheckpointInfo | null>(null);
+  const [checkpointError, setCheckpointError] = useState<string | null>(null);
 
   if (!ready) {
     return (
@@ -82,6 +90,44 @@ export function App() {
   const suffix = readString(settings.publisherSettings.default_prompt_suffix, '');
   const showAdvanced = readBoolean(settings.publisherSettings.show_advanced, false);
 
+  // The host computes the effective checkpoint (publisher default ∪ viewer
+  // override) before BLOCK_INIT. localCheckpoint shadows it for instant UI
+  // updates after a picker swap; falls back to the BLOCK_INIT value at mount.
+  const effectiveCheckpoint: BlockCheckpointInfo | null =
+    localCheckpoint ?? model.checkpoint ?? null;
+  // For Checkpoint-bound installs the picker is suppressed — the model IS
+  // the anchor and there's nothing to change. For LoRA installs we always
+  // show the [Change] button next to the current checkpoint label.
+  const showCheckpointPicker = model.modelType !== 'Checkpoint';
+
+  const handleChangeCheckpoint = async () => {
+    setCheckpointError(null);
+    // baseModelGroup: the host expands this into the exact baseModel filter.
+    // We pass the LoRA's own baseModel; the host collapses to the ecosystem
+    // family so Flux.1 D / Flux.1 S etc. all resolve to 'Flux1'.
+    const baseModelGroup =
+      effectiveCheckpoint?.baseModel ?? model.modelType /* fallback only */;
+    try {
+      const { selected } = await checkpointPicker.open({
+        baseModelGroup,
+        ...(effectiveCheckpoint ? { currentVersionId: effectiveCheckpoint.versionId } : {}),
+      });
+      if (!selected) return; // user dismissed
+      // Optimistic: update the label immediately. Then persist server-side.
+      setLocalCheckpoint(selected);
+      try {
+        await checkpointPicker.persist(selected.versionId);
+      } catch (err) {
+        // Persist failed (e.g. wrong-ecosystem) — surface to user and roll
+        // back the optimistic update.
+        setLocalCheckpoint(null);
+        setCheckpointError(err instanceof Error ? err.message : 'could not save checkpoint');
+      }
+    } catch (err) {
+      setCheckpointError(err instanceof Error ? err.message : 'picker failed');
+    }
+  };
+
   const busy: WorkflowStatus[] = ['estimating', 'confirming', 'submitting', 'polling'];
   const isBusy = busy.includes(status);
 
@@ -115,6 +161,33 @@ export function App() {
   return (
     <div ref={rootRef} style={containerStyle(theme)}>
       <Header model={model} />
+
+      {showCheckpointPicker && (
+        <div style={checkpointRowStyle(theme)}>
+          <span style={subtleStyle}>
+            Generating with:{' '}
+            {effectiveCheckpoint ? (
+              <strong>
+                {effectiveCheckpoint.modelName}
+                {effectiveCheckpoint.versionName ? ` (${effectiveCheckpoint.versionName})` : ''}
+              </strong>
+            ) : (
+              <em>no checkpoint configured</em>
+            )}
+          </span>
+          <button
+            type="button"
+            onClick={handleChangeCheckpoint}
+            style={linkButtonStyle()}
+            disabled={isBusy}
+          >
+            Change
+          </button>
+        </div>
+      )}
+      {checkpointError && (
+        <p style={errorTextStyle}>Checkpoint: {checkpointError}</p>
+      )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <input
@@ -263,6 +336,17 @@ const headerStyle: CSSProperties = {
   gap: 2,
   marginBottom: 4,
 };
+
+const checkpointRowStyle = (theme: string | null): CSSProperties => ({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 8,
+  padding: '6px 10px',
+  borderRadius: 6,
+  background: theme === 'dark' ? '#1f2937' : '#f3f4f6',
+  fontSize: 13,
+});
 
 const subtleStyle: CSSProperties = {
   opacity: 0.7,
