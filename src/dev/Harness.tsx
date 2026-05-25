@@ -103,6 +103,7 @@ export function Harness({ children }: { children: ReactNode }) {
           steps: 30,
           seed: 12345,
           sampler: 'DPM++ 2M Karras',
+          clipSkip: 2,
         },
         {
           id: 102,
@@ -115,6 +116,7 @@ export function Harness({ children }: { children: ReactNode }) {
           steps: 25,
           seed: 67890,
           sampler: 'Euler',
+          clipSkip: null,
         },
         {
           id: 103,
@@ -127,6 +129,7 @@ export function Harness({ children }: { children: ReactNode }) {
           steps: null,
           seed: null,
           sampler: null,
+          clipSkip: null,
         },
       ],
     };

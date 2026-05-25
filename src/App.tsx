@@ -47,6 +47,7 @@ type ParamOverrides = {
   sampler?: string;
   width?: number;
   height?: number;
+  clipSkip?: number;
 };
 
 export function App() {
@@ -578,6 +579,7 @@ function AdvancedSection(props: {
     sampler: overrides.sampler ?? showcase?.sampler ?? '',
     width: overrides.width ?? showcase?.width ?? null,
     height: overrides.height ?? showcase?.height ?? null,
+    clipSkip: overrides.clipSkip ?? showcase?.clipSkip ?? null,
   };
 
   return (
@@ -617,6 +619,7 @@ function ReadOnlyChips(props: {
     sampler: string;
     width: number | null;
     height: number | null;
+    clipSkip: number | null;
   };
   randomizeSeedOnce: boolean;
   theme: string | null;
@@ -630,6 +633,7 @@ function ReadOnlyChips(props: {
   if (eff.width != null && eff.height != null) {
     chips.push(['size', `${eff.width}×${eff.height}`]);
   }
+  if (eff.clipSkip != null) chips.push(['clip skip', String(eff.clipSkip)]);
   if (eff.negativePrompt) chips.push(['neg', truncate(eff.negativePrompt, 40)]);
 
   if (chips.length === 0) {
@@ -656,6 +660,7 @@ function EditableControls(props: {
     sampler: string;
     width: number | null;
     height: number | null;
+    clipSkip: number | null;
   };
   overrides: ParamOverrides;
   onOverrideChange: (patch: ParamOverrides) => void;
@@ -817,6 +822,26 @@ function EditableControls(props: {
           />
         </label>
       </div>
+
+      <label style={labelStyle}>
+        Clip skip
+        <input
+          type="number"
+          min={0}
+          max={12}
+          step={1}
+          value={eff.clipSkip ?? ''}
+          placeholder="auto (Flux ignores this)"
+          onChange={(e) =>
+            onOverrideChange({
+              clipSkip:
+                e.target.value === '' ? undefined : Math.round(Number(e.target.value)),
+            })
+          }
+          disabled={isBusy}
+          style={inputStyle(theme)}
+        />
+      </label>
     </div>
   );
 }
@@ -923,6 +948,9 @@ function buildSubmitParams(
   const sampler = overrides.sampler ?? selected?.sampler ?? undefined;
   const rawWidth = overrides.width ?? selected?.width ?? undefined;
   const rawHeight = overrides.height ?? selected?.height ?? undefined;
+  const clipSkipRaw = overrides.clipSkip ?? selected?.clipSkip ?? undefined;
+  const clipSkip =
+    clipSkipRaw != null ? Math.min(12, Math.max(0, Math.round(clipSkipRaw))) : undefined;
 
   // Block-side schema caps mirror src/server/schema/blocks/workflow.schema.ts.
   // Showcase images can carry values beyond these caps (eg. an upscaled
@@ -941,6 +969,7 @@ function buildSubmitParams(
     ...(sampler ? { sampler } : {}),
     ...(width ? { width } : {}),
     ...(height ? { height } : {}),
+    ...(clipSkip != null ? { clipSkip } : {}),
     quantity: 1,
   };
 }
