@@ -146,6 +146,16 @@ export function Harness({ children }: { children: ReactNode }) {
       const v = Number(search.get('buzz_budget_per_gen'));
       if (Number.isFinite(v)) publisherSettings.buzz_budget_per_gen = v;
     }
+    // ?theme=dark flips the harness into dark mode so we can visually
+    // verify both surfaces without rebuilding. Default = light.
+    const themeParam = search.get('theme') === 'dark' ? 'dark' : 'light';
+    context.theme = themeParam;
+    if (typeof document !== 'undefined') {
+      // Mirror what the host does — sets a [data-theme] attribute on the
+      // body so any future :hover/:focus selectors keyed off it light up.
+      document.documentElement.setAttribute('data-theme', themeParam);
+      document.body.style.background = themeParam === 'dark' ? '#101113' : '#fefefe';
+    }
     const payload: BlockInitPayload = {
       blockInstanceId: DEV_INSTANCE_ID,
       blockId: DEV_BLOCK_ID,
@@ -154,7 +164,7 @@ export function Harness({ children }: { children: ReactNode }) {
       context,
       settings: { publisherSettings, userSettings: {} },
       viewer: { id: 2, username: 'dev-viewer', status: 'active' },
-      theme: 'light',
+      theme: themeParam,
       renderMode: 'iframe',
     };
     // Defer one tick so the block app's transport listener is registered

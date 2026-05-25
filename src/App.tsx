@@ -264,8 +264,9 @@ export function App() {
 
   if (!ready) {
     return (
-      <div ref={rootRef} style={loadingStyle}>
-        Loading…
+      <div ref={rootRef} style={containerStyle(theme)}>
+        <StyleSheet />
+        <LoadingSkeleton theme={theme} />
       </div>
     );
   }
@@ -388,6 +389,7 @@ export function App() {
 
   return (
     <div ref={rootRef} style={containerStyle(theme)}>
+      <StyleSheet />
       <Header model={model} />
 
       {showCheckpointPicker && (
@@ -395,7 +397,7 @@ export function App() {
           <span style={subtleStyle}>
             Generating with:{' '}
             {effectiveCheckpoint ? (
-              <strong>
+              <strong style={{ color: 'inherit', opacity: 1 }}>
                 {effectiveCheckpoint.modelName}
                 {effectiveCheckpoint.versionName ? ` (${effectiveCheckpoint.versionName})` : ''}
               </strong>
@@ -406,6 +408,7 @@ export function App() {
           <button
             type="button"
             onClick={handleChangeCheckpoint}
+            className="gfm-link"
             style={linkButtonStyle()}
             disabled={isBusy}
           >
@@ -428,8 +431,10 @@ export function App() {
                 key={img.id}
                 type="button"
                 aria-label={`Pick preview ${idx + 1}`}
+                aria-pressed={idx === selectedShowcaseIdx}
                 onClick={() => setSelectedShowcaseIdx(idx)}
                 disabled={isBusy}
+                className="gfm-thumb"
                 style={thumbButtonStyle(idx === selectedShowcaseIdx, theme)}
               >
                 <img src={img.url} alt="" style={thumbImageStyle} loading="lazy" />
@@ -445,6 +450,7 @@ export function App() {
           placeholder={`Optional prompt — defaults to ${model.modelName}'s style`}
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
+          className="gfm-input"
           style={inputStyle(theme)}
           disabled={isBusy}
         />
@@ -475,14 +481,16 @@ export function App() {
           type="button"
           onClick={handleGenerate}
           disabled={isBusy}
-          style={primaryButtonStyle()}
+          className="gfm-primary"
+          style={primaryButtonStyle(isBusy)}
         >
-          {labelForStatus(status, budget, estimatedCost)}
+          {isBusy && <Pulse />}
+          <span>{labelForStatus(status, budget, estimatedCost)}</span>
         </button>
       </div>
 
       {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && (
-        <div style={errorBoxStyle}>
+        <div style={errorBoxStyle(theme)} role="alert">
           <p style={{ margin: 0 }}>
             {error?.message ?? result?.error ?? 'Generation failed.'}
           </p>
@@ -490,7 +498,8 @@ export function App() {
             <button
               type="button"
               onClick={() => openPurchaseModal(budget * 10)}
-              style={linkButtonStyle()}
+              className="gfm-link"
+              style={{ ...linkButtonStyle(), color: theme === 'dark' ? '#74C0FC' : '#1971C2' }}
             >
               Top up Buzz →
             </button>
@@ -506,12 +515,13 @@ export function App() {
       {status === 'polling' &&
         result &&
         (result.status === 'pending' || result.status === 'processing') && (
-          <p style={subtleStyle}>
-            {result.status === 'pending' ? 'Queued…' : 'Generating…'}
+          <p style={{ ...subtleStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
+            <Pulse />
+            <span>{result.status === 'pending' ? 'Queued…' : 'Generating…'}</span>
           </p>
         )}
 
-      {result && result.status === 'succeeded' && <Result snapshot={result} />}
+      {result && result.status === 'succeeded' && <Result snapshot={result} theme={theme} />}
     </div>
   );
 }
@@ -521,7 +531,7 @@ export function App() {
 function Header({ model }: { model: ModelSlotContext }) {
   return (
     <header style={headerStyle}>
-      <strong>Generate from this model</strong>
+      <h3 style={headerTitleStyle}>Generate from this model</h3>
       <small style={subtleStyle}>
         {model.modelName} · v{model.modelVersionId}
       </small>
@@ -584,12 +594,21 @@ function AdvancedSection(props: {
 
   return (
     <div style={advancedWrapperStyle(theme)}>
-      <button type="button" onClick={onToggle} style={advancedToggleStyle(theme)}>
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={open}
+        className="gfm-advanced-toggle"
+        style={advancedToggleStyle(theme)}
+      >
         <span>⚙ Advanced {editable ? '' : '(read-only)'}</span>
-        <span style={{ opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
+        <span style={{ opacity: 0.6, transition: 'transform 180ms ease-out', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}>▸</span>
       </button>
-      {open && (
-        <div style={advancedBodyStyle}>
+      <div
+        aria-hidden={!open}
+        style={advancedCollapseStyle(open)}
+      >
+        <div style={advancedBodyStyle(theme)}>
           {editable ? (
             <EditableControls
               eff={eff}
@@ -605,7 +624,7 @@ function AdvancedSection(props: {
             <ReadOnlyChips eff={eff} randomizeSeedOnce={randomizeSeedOnce} theme={theme} />
           )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
@@ -696,6 +715,7 @@ function EditableControls(props: {
           onChange={(e) => onOverrideChange({ negativePrompt: e.target.value })}
           disabled={isBusy}
           rows={2}
+          className="gfm-input"
           style={{ ...inputStyle(theme), resize: 'vertical', fontFamily: 'inherit' }}
         />
       </label>
@@ -714,6 +734,7 @@ function EditableControls(props: {
               onOverrideChange({ cfgScale: e.target.value === '' ? undefined : Number(e.target.value) })
             }
             disabled={isBusy}
+            className="gfm-input"
             style={inputStyle(theme)}
           />
         </label>
@@ -732,6 +753,7 @@ function EditableControls(props: {
               })
             }
             disabled={isBusy}
+            className="gfm-input"
             style={inputStyle(theme)}
           />
         </label>
@@ -752,6 +774,7 @@ function EditableControls(props: {
               });
             }}
             disabled={isBusy || randomizeSeedOnce}
+            className="gfm-input"
             style={{ ...inputStyle(theme), flex: 1 }}
           />
           <button
@@ -800,6 +823,7 @@ function EditableControls(props: {
               })
             }
             disabled={isBusy}
+            className="gfm-input"
             style={inputStyle(theme)}
           />
         </label>
@@ -818,6 +842,7 @@ function EditableControls(props: {
               })
             }
             disabled={isBusy}
+            className="gfm-input"
             style={inputStyle(theme)}
           />
         </label>
@@ -850,21 +875,21 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-function Result({ snapshot }: { snapshot: BlockWorkflowSnapshot }) {
+function Result({ snapshot, theme }: { snapshot: BlockWorkflowSnapshot; theme: string | null }) {
   return (
-    <div style={{ marginTop: 8 }}>
+    <div className="gfm-fade-in" style={{ marginTop: 8 }}>
       {snapshot.imageUrls?.map((url, i) => (
         <img
           key={url}
           src={url}
           alt={`Generation ${i + 1}`}
-          style={imageStyle}
+          style={imageStyle(theme)}
           loading="lazy"
         />
       ))}
       {snapshot.cost?.total != null && (
         <p style={subtleStyle}>
-          Spent <strong>{snapshot.cost.total} Buzz</strong>
+          Spent <strong style={{ opacity: 1, color: 'inherit' }}>{snapshot.cost.total} Buzz</strong>
         </p>
       )}
     </div>
@@ -1045,6 +1070,88 @@ function writePersistedShowcaseId(key: string, id: number): void {
   }
 }
 
+// --------- subcomponents (skeleton, pulse, stylesheet) ---------
+
+/**
+ * One-time injection of CSS rules that can't be expressed as inline styles
+ * — keyframes, :hover, :focus-visible. Lives at the top of the tree so a
+ * remount overwrites cleanly. The `data-gfm-styles` attribute prevents
+ * double-injection if the block ever re-renders before unmount completes.
+ */
+function StyleSheet() {
+  useEffect(() => {
+    const id = 'gfm-block-styles';
+    if (document.getElementById(id)) return;
+    const el = document.createElement('style');
+    el.id = id;
+    el.textContent = STYLESHEET_CSS;
+    document.head.appendChild(el);
+    return () => {
+      // Leave it: if multiple block instances ever mount in the same iframe
+      // we don't want one unmount to nuke the others' styles. The id-guard
+      // up top prevents duplication.
+    };
+  }, []);
+  return null;
+}
+
+/**
+ * Loading skeleton matching the block's eventual layout — header line +
+ * checkpoint row + primary CTA. Subtle shimmer animation so the user
+ * gets a "something's coming" signal during the BLOCK_INIT round-trip.
+ */
+function LoadingSkeleton({ theme }: { theme: string | null }) {
+  const bar = (w: string, h = 14): CSSProperties => ({
+    width: w,
+    height: h,
+    borderRadius: 4,
+    background:
+      theme === 'dark'
+        ? 'linear-gradient(90deg, #1A1B1E 0%, #25262B 50%, #1A1B1E 100%)'
+        : 'linear-gradient(90deg, #e9ecef 0%, #f1f3f5 50%, #e9ecef 100%)',
+    backgroundSize: '200% 100%',
+    animation: 'gfm-shimmer 1.4s ease-in-out infinite',
+  });
+  return (
+    <div aria-hidden style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div style={bar('60%', 18)} />
+      <div style={bar('40%', 12)} />
+      <div style={{ ...bar('100%', 30), marginTop: 6 }} />
+      <div style={{ ...bar('100%', 40), marginTop: 10 }} />
+    </div>
+  );
+}
+
+/**
+ * 6px brand-color dot with a quiet opacity pulse — used to signal active
+ * busy states (estimating / submitting / polling) without an explicit
+ * spinner. Subtle enough to live next to or inside the primary CTA.
+ */
+function Pulse() {
+  return (
+    <span
+      aria-hidden
+      style={{
+        display: 'inline-block',
+        width: 6,
+        height: 6,
+        borderRadius: 999,
+        background: 'currentColor',
+        animation: 'gfm-pulse 1.4s ease-in-out infinite',
+      }}
+    />
+  );
+}
+
+// --------- design tokens ---------
+
+// Civitai brand blue (Mantine blue[8] = #1971C2). Hover lands on blue[9]
+// (#1864AB). Light variants used for focus rings + dark-theme link text.
+const BRAND = '#1971C2';
+const BRAND_HOVER = '#1864AB';
+const BRAND_LIGHT_DARK = '#4DABF7'; // blue[4] — readable on dark surfaces
+const FOCUS_RING = 'rgba(25, 113, 194, 0.35)';
+
 // --------- styles (inline; the host injects [data-theme]) ---------
 
 const containerStyle = (theme: string | null): CSSProperties => ({
@@ -1052,17 +1159,13 @@ const containerStyle = (theme: string | null): CSSProperties => ({
   display: 'flex',
   flexDirection: 'column',
   gap: 12,
-  fontFamily: 'system-ui, -apple-system, sans-serif',
-  color: theme === 'dark' ? '#e5e7eb' : '#111827',
-  background: theme === 'dark' ? '#111827' : '#ffffff',
+  // Match host font stack — same list Civitai uses in tailwind.config.js.
+  fontFamily:
+    '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
+  color: theme === 'dark' ? '#C1C2C5' : '#222222',
+  background: theme === 'dark' ? '#1A1B1E' : '#fefefe',
   borderRadius: 8,
 });
-
-const loadingStyle: CSSProperties = {
-  padding: 16,
-  fontSize: 14,
-  color: '#6b7280',
-};
 
 const headerStyle: CSSProperties = {
   display: 'flex',
@@ -1071,14 +1174,23 @@ const headerStyle: CSSProperties = {
   marginBottom: 4,
 };
 
+const headerTitleStyle: CSSProperties = {
+  margin: 0,
+  fontSize: 16,
+  fontWeight: 600,
+  letterSpacing: '-0.01em',
+  lineHeight: 1.25,
+};
+
 const checkpointRowStyle = (theme: string | null): CSSProperties => ({
   display: 'flex',
   alignItems: 'center',
   justifyContent: 'space-between',
   gap: 8,
-  padding: '6px 10px',
+  padding: '8px 12px',
   borderRadius: 6,
-  background: theme === 'dark' ? '#1f2937' : '#f3f4f6',
+  background: theme === 'dark' ? '#25262B' : '#f1f3f5',
+  border: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
   fontSize: 13,
 });
 
@@ -1090,15 +1202,13 @@ const carouselStyle: CSSProperties = {
 
 const thumbButtonStyle = (selected: boolean, theme: string | null): CSSProperties => ({
   padding: 0,
-  border: `2px solid ${selected ? '#3b82f6' : theme === 'dark' ? '#374151' : '#d1d5db'}`,
+  border: `2px solid ${selected ? BRAND : theme === 'dark' ? '#373A40' : '#dee2e6'}`,
   borderRadius: 6,
   background: 'transparent',
   cursor: 'pointer',
   overflow: 'hidden',
-  // Slightly larger when selected so the highlight is visible without
-  // shifting layout — the border itself is the primary indicator.
-  outline: selected ? '1px solid #60a5fa' : 'none',
-  outlineOffset: 1,
+  transition: 'border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out',
+  boxShadow: selected ? `0 0 0 3px ${FOCUS_RING}` : 'none',
 });
 
 const thumbImageStyle: CSSProperties = {
@@ -1116,61 +1226,79 @@ const subtleStyle: CSSProperties = {
 
 const errorTextStyle: CSSProperties = {
   margin: 0,
-  color: '#dc2626',
+  color: '#f03e3e', // Mantine red[7]
   fontSize: 14,
 };
 
 const inputStyle = (theme: string | null): CSSProperties => ({
   padding: '8px 12px',
   borderRadius: 6,
-  border: `1px solid ${theme === 'dark' ? '#374151' : '#d1d5db'}`,
-  background: theme === 'dark' ? '#1f2937' : '#ffffff',
+  border: `1px solid ${theme === 'dark' ? '#373A40' : '#ced4da'}`,
+  background: theme === 'dark' ? '#25262B' : '#ffffff',
   color: 'inherit',
   fontSize: 14,
+  outline: 'none',
+  transition: 'border-color 140ms ease-out, box-shadow 140ms ease-out',
 });
 
-const primaryButtonStyle = (): CSSProperties => ({
+const primaryButtonStyle = (busy: boolean): CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  gap: 8,
   padding: '10px 14px',
   borderRadius: 6,
-  background: '#3b82f6',
+  background: BRAND,
   color: '#ffffff',
   fontSize: 14,
   fontWeight: 600,
   border: 'none',
-  cursor: 'pointer',
+  cursor: busy ? 'progress' : 'pointer',
+  // box-shadow + transform on hover handled in CSS. Keep transition on
+  // inline style so the easing applies even when CSS isn't loaded yet.
+  transition: 'background-color 140ms ease-out, transform 140ms ease-out, box-shadow 140ms ease-out, opacity 140ms ease-out',
+  opacity: busy ? 0.85 : 1,
 });
 
 const linkButtonStyle = (): CSSProperties => ({
   background: 'transparent',
   border: 'none',
-  color: '#3b82f6',
-  fontSize: 14,
+  color: BRAND,
+  fontSize: 13,
   fontWeight: 500,
   cursor: 'pointer',
   padding: 0,
-  marginTop: 8,
+  transition: 'color 140ms ease-out, opacity 140ms ease-out',
 });
 
-const errorBoxStyle: CSSProperties = {
+const errorBoxStyle = (theme: string | null): CSSProperties => ({
   padding: 12,
   borderRadius: 6,
-  background: '#fef2f2',
-  color: '#991b1b',
-  border: '1px solid #fecaca',
+  background: theme === 'dark' ? 'rgba(224, 49, 49, 0.12)' : '#fff5f5',
+  color: theme === 'dark' ? '#ffa8a8' : '#c92a2a',
+  border: `1px solid ${theme === 'dark' ? 'rgba(224, 49, 49, 0.4)' : '#ffc9c9'}`,
   fontSize: 14,
-};
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+});
 
-const imageStyle: CSSProperties = {
+const imageStyle = (theme: string | null): CSSProperties => ({
   maxWidth: '100%',
   borderRadius: 6,
   display: 'block',
   marginBottom: 8,
-};
+  boxShadow:
+    theme === 'dark'
+      ? '0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.04)'
+      : '0 1px 3px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.04)',
+});
 
 const advancedWrapperStyle = (theme: string | null): CSSProperties => ({
-  border: `1px solid ${theme === 'dark' ? '#374151' : '#e5e7eb'}`,
+  border: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
   borderRadius: 6,
-  background: theme === 'dark' ? '#0f172a' : '#f9fafb',
+  background: theme === 'dark' ? '#141517' : '#f8f9fa',
+  overflow: 'hidden',
 });
 
 const advancedToggleStyle = (theme: string | null): CSSProperties => ({
@@ -1178,19 +1306,31 @@ const advancedToggleStyle = (theme: string | null): CSSProperties => ({
   alignItems: 'center',
   justifyContent: 'space-between',
   width: '100%',
-  padding: '6px 10px',
+  padding: '8px 12px',
   background: 'transparent',
   border: 'none',
-  color: theme === 'dark' ? '#e5e7eb' : '#111827',
+  color: theme === 'dark' ? '#C1C2C5' : '#222222',
   fontSize: 13,
   fontWeight: 500,
   cursor: 'pointer',
+  textAlign: 'left',
+  transition: 'background-color 140ms ease-out',
 });
 
-const advancedBodyStyle: CSSProperties = {
-  padding: '8px 10px 10px',
-  borderTop: '1px solid rgba(125, 125, 125, 0.2)',
-};
+// Smooth max-height collapse. 600px is a generous cap — the body is
+// always shorter in practice. height: auto can't be transitioned, so the
+// cap is the trade-off cost.
+const advancedCollapseStyle = (open: boolean): CSSProperties => ({
+  maxHeight: open ? 600 : 0,
+  opacity: open ? 1 : 0,
+  overflow: 'hidden',
+  transition: 'max-height 200ms ease-out, opacity 160ms ease-out',
+});
+
+const advancedBodyStyle = (theme: string | null): CSSProperties => ({
+  padding: '10px 12px 12px',
+  borderTop: `1px solid ${theme === 'dark' ? '#25262B' : '#e9ecef'}`,
+});
 
 const chipRowStyle: CSSProperties = {
   display: 'flex',
@@ -1199,9 +1339,10 @@ const chipRowStyle: CSSProperties = {
 };
 
 const chipStyle = (theme: string | null): CSSProperties => ({
-  padding: '2px 8px',
+  padding: '3px 9px',
   borderRadius: 999,
-  background: theme === 'dark' ? '#1f2937' : '#e5e7eb',
+  background: theme === 'dark' ? '#25262B' : '#e9ecef',
+  border: `1px solid ${theme === 'dark' ? '#373A40' : '#dee2e6'}`,
   fontSize: 12,
   fontFamily: 'ui-monospace, SFMono-Regular, monospace',
 });
@@ -1230,12 +1371,117 @@ const labelStyle: CSSProperties = {
 const diceButtonStyle = (active: boolean, theme: string | null): CSSProperties => ({
   padding: '6px 10px',
   borderRadius: 6,
-  border: `1px solid ${active ? '#3b82f6' : theme === 'dark' ? '#374151' : '#d1d5db'}`,
-  background: active ? '#3b82f6' : 'transparent',
+  border: `1px solid ${active ? BRAND : theme === 'dark' ? '#373A40' : '#ced4da'}`,
+  background: active ? BRAND : 'transparent',
   color: active ? '#ffffff' : 'inherit',
   fontSize: 12,
   fontWeight: 500,
   cursor: 'pointer',
   whiteSpace: 'nowrap',
+  transition: 'background-color 140ms ease-out, border-color 140ms ease-out, color 140ms ease-out',
 });
+
+// --------- stylesheet rules (hover/focus/keyframes) ---------
+// Inline styles can't express :hover / :focus-visible / keyframes. The
+// rest of the visual language lives here. Selectors are scoped via the
+// gfm- prefix so we don't accidentally bleed onto host page styles —
+// the iframe sandbox already isolates us, but the prefix is belt-and-
+// braces hygiene.
+const STYLESHEET_CSS = `
+@keyframes gfm-shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+@keyframes gfm-pulse {
+  0%, 100% { opacity: 0.35; transform: scale(0.85); }
+  50% { opacity: 1; transform: scale(1); }
+}
+@keyframes gfm-fade-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.gfm-fade-in { animation: gfm-fade-in 240ms ease-out both; }
+.gfm-fade-in img { animation: gfm-fade-in 280ms ease-out both; }
+
+/* Primary CTA — lift on hover, sink on press, brand-darken bg. */
+.gfm-primary:not(:disabled):hover {
+  background-color: ${BRAND_HOVER};
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(25, 113, 194, 0.28);
+}
+.gfm-primary:not(:disabled):active {
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(25, 113, 194, 0.22);
+}
+.gfm-primary:disabled {
+  cursor: not-allowed;
+  opacity: 0.78;
+}
+.gfm-primary:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px ${FOCUS_RING};
+}
+
+/* Carousel thumbs — gentle scale + brightness on hover. */
+.gfm-thumb:not(:disabled):hover {
+  transform: scale(1.04);
+  filter: brightness(1.06);
+}
+.gfm-thumb:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px ${FOCUS_RING};
+}
+.gfm-thumb:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* Inputs — brand focus ring matching the host's Mantine inputs. */
+.gfm-input:focus,
+.gfm-input:focus-visible {
+  border-color: ${BRAND} !important;
+  box-shadow: 0 0 0 3px ${FOCUS_RING};
+}
+
+/* Inline-link button — hover darkens, underline only on hover so it
+   doesn't read as a footer-link by default. */
+.gfm-link:not(:disabled):hover {
+  color: ${BRAND_HOVER};
+  text-decoration: underline;
+}
+[data-theme="dark"] .gfm-link:not(:disabled):hover {
+  color: ${BRAND_LIGHT_DARK};
+}
+.gfm-link:focus-visible {
+  outline: none;
+  border-radius: 2px;
+  box-shadow: 0 0 0 3px ${FOCUS_RING};
+}
+.gfm-link:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Advanced toggle — subtle hover tint so the affordance reads. */
+.gfm-advanced-toggle:hover {
+  background-color: rgba(125, 125, 125, 0.06);
+}
+.gfm-advanced-toggle:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px ${FOCUS_RING};
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Respect user accessibility preference — host theme also sets this. */
+  .gfm-fade-in,
+  .gfm-fade-in img,
+  .gfm-thumb,
+  .gfm-primary,
+  .gfm-input {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+`;
 
