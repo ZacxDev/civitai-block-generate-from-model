@@ -947,15 +947,18 @@ function buildSubmitParams(
 
 const DIM_MIN = 64;
 const DIM_MAX = 2048;
+// Orchestrator U-Net constraint: width/height must both be multiples of 64.
+// Rounding to /64 here is the responsibility of the block, not the host —
+// the host schema only checks the [DIM_MIN, DIM_MAX] range.
 function clampDimensions(w?: number, h?: number): [number | undefined, number | undefined] {
   if (w == null || h == null) return [w, h];
-  if (w <= DIM_MAX && h <= DIM_MAX && w >= DIM_MIN && h >= DIM_MIN) return [round8(w), round8(h)];
+  if (w <= DIM_MAX && h <= DIM_MAX && w >= DIM_MIN && h >= DIM_MIN) return [round64(w), round64(h)];
   const scale = Math.min(DIM_MAX / w, DIM_MAX / h);
   const sw = Math.max(DIM_MIN, Math.round(w * scale));
   const sh = Math.max(DIM_MIN, Math.round(h * scale));
-  return [round8(sw), round8(sh)];
+  return [round64(sw), round64(sh)];
 }
-const round8 = (n: number) => Math.max(DIM_MIN, Math.min(DIM_MAX, Math.round(n / 8) * 8));
+const round64 = (n: number) => Math.max(DIM_MIN, Math.min(DIM_MAX, Math.round(n / 64) * 64));
 
 function asModelContext(ctx: BlockContext): ModelSlotContext | null {
   if (
