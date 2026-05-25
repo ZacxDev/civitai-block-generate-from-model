@@ -921,14 +921,22 @@ function buildSubmitParams(
   const seedRaw = overrides.seed ?? selected?.seed ?? undefined;
   const seed = randomizeSeed ? undefined : seedRaw;
   const sampler = overrides.sampler ?? selected?.sampler ?? undefined;
-  const width = overrides.width ?? selected?.width ?? undefined;
-  const height = overrides.height ?? selected?.height ?? undefined;
+  const rawWidth = overrides.width ?? selected?.width ?? undefined;
+  const rawHeight = overrides.height ?? selected?.height ?? undefined;
+
+  // Block-side schema caps mirror src/server/schema/blocks/workflow.schema.ts.
+  // Showcase images can carry values beyond these caps (eg. an upscaled
+  // 3000x2000 preview), so clamp before sending or the server returns
+  // BAD_REQUEST. Dimensions scale-down preserves aspect ratio.
+  const [width, height] = clampDimensions(rawWidth, rawHeight);
+  const clampedSteps = steps != null ? Math.min(50, Math.max(1, Math.round(steps))) : undefined;
+  const clampedCfg = cfgScale != null ? Math.min(30, Math.max(1, cfgScale)) : undefined;
 
   return {
     prompt: composed,
     ...(negativePrompt ? { negativePrompt } : {}),
-    ...(cfgScale != null ? { cfgScale } : {}),
-    ...(steps != null ? { steps } : {}),
+    ...(clampedCfg != null ? { cfgScale: clampedCfg } : {}),
+    ...(clampedSteps != null ? { steps: clampedSteps } : {}),
     ...(seed != null ? { seed } : {}),
     ...(sampler ? { sampler } : {}),
     ...(width ? { width } : {}),
@@ -936,6 +944,18 @@ function buildSubmitParams(
     quantity: 1,
   };
 }
+
+const DIM_MIN = 64;
+const DIM_MAX = 2048;
+function clampDimensions(w?: number, h?: number): [number | undefined, number | undefined] {
+  if (w == null || h == null) return [w, h];
+  if (w <= DIM_MAX && h <= DIM_MAX && w >= DIM_MIN && h >= DIM_MIN) return [round8(w), round8(h)];
+  const scale = Math.min(DIM_MAX / w, DIM_MAX / h);
+  const sw = Math.max(DIM_MIN, Math.round(w * scale));
+  const sh = Math.max(DIM_MIN, Math.round(h * scale));
+  return [round8(sw), round8(sh)];
+}
+const round8 = (n: number) => Math.max(DIM_MIN, Math.min(DIM_MAX, Math.round(n / 8) * 8));
 
 function asModelContext(ctx: BlockContext): ModelSlotContext | null {
   if (
