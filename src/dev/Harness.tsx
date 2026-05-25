@@ -88,14 +88,68 @@ export function Harness({ children }: { children: ReactNode }) {
       viewerUsername: 'dev-viewer',
       viewerStatus: 'active',
       theme: 'light',
+      // Mock showcases so the carousel + advanced-controls flow is
+      // exercisable locally. Mirrors the shape the host sends in prod
+      // (see ShowcaseImage in @civitai/app-sdk/blocks).
+      showcaseImages: [
+        {
+          id: 101,
+          url: 'https://picsum.photos/seed/civitai-101/256/256',
+          width: 1024,
+          height: 1024,
+          prompt: 'a serene mountain landscape at sunset, painterly',
+          negativePrompt: 'blurry, low quality',
+          cfgScale: 7.5,
+          steps: 30,
+          seed: 12345,
+          sampler: 'DPM++ 2M Karras',
+        },
+        {
+          id: 102,
+          url: 'https://picsum.photos/seed/civitai-102/256/256',
+          width: 768,
+          height: 1152,
+          prompt: 'cyberpunk cityscape, neon reflections, rain',
+          negativePrompt: null,
+          cfgScale: 6.0,
+          steps: 25,
+          seed: 67890,
+          sampler: 'Euler',
+        },
+        {
+          id: 103,
+          url: 'https://picsum.photos/seed/civitai-103/256/256',
+          width: 1024,
+          height: 1024,
+          prompt: null,
+          negativePrompt: null,
+          cfgScale: null,
+          steps: null,
+          seed: null,
+          sampler: null,
+        },
+      ],
     };
+    // Allow ?show_advanced=1 in the dev URL to flip the publisher setting
+    // on locally. Lets manual testing exercise the editable-controls path
+    // without rebuilding. Default is the production-realistic
+    // empty-publisher-settings shape.
+    const search = new URLSearchParams(window.location.search);
+    const publisherSettings: Record<string, unknown> = {};
+    if (search.get('show_advanced') === '1') {
+      publisherSettings.show_advanced = true;
+    }
+    if (search.has('buzz_budget_per_gen')) {
+      const v = Number(search.get('buzz_budget_per_gen'));
+      if (Number.isFinite(v)) publisherSettings.buzz_budget_per_gen = v;
+    }
     const payload: BlockInitPayload = {
       blockInstanceId: DEV_INSTANCE_ID,
       blockId: DEV_BLOCK_ID,
       appId: DEV_APP_ID,
       token: nextToken(),
       context,
-      settings: { publisherSettings: {}, userSettings: {} },
+      settings: { publisherSettings, userSettings: {} },
       viewer: { id: 2, username: 'dev-viewer', status: 'active' },
       theme: 'light',
       renderMode: 'iframe',

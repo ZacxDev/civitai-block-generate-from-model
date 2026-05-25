@@ -32,8 +32,25 @@ import type {
  * - No prompt-required gate — empty prompt uses the model's trigger phrase
  *   via server-side defaulting
  */
+/**
+ * User-supplied overrides to the showcase image's gen params. Only the
+ * fields the user actively edited are stored here — undefined fields fall
+ * through to the showcase value in buildSubmitParams(). Cleared on
+ * showcase swap (selecting a new image is an explicit "reset to its
+ * params" signal — see Gap 3 in the day-2 handoff).
+ */
+type ParamOverrides = {
+  negativePrompt?: string;
+  cfgScale?: number;
+  steps?: number;
+  seed?: number;
+  sampler?: string;
+  width?: number;
+  height?: number;
+};
+
 export function App() {
-  const { ready, context, viewer, theme } = useBlockContext();
+  const { ready, context, viewer, theme, blockInstanceId } = useBlockContext();
   const settings = useBlockSettings();
   const { submit, estimate, poll, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
@@ -42,6 +59,16 @@ export function App() {
   useBlockResize(rootRef);
 
   const [prompt, setPrompt] = useState('');
+  // User-edited overrides to the selected showcase's params. See type
+  // doc above. Cleared on showcase swap.
+  const [overrides, setOverrides] = useState<ParamOverrides>({});
+  // Advanced section open/closed. Persists for the session via useState
+  // (not localStorage — open/closed state is too noisy to round-trip).
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  // One-shot randomize-seed flag. Consumed by the next submit() call,
+  // then auto-reset. Picking a new showcase also resets it (selecting an
+  // image is a "use this seed" signal — see Gap 2 design notes).
+  const [randomizeSeedOnce, setRandomizeSeedOnce] = useState(false);
   // Mirror the host-supplied checkpoint locally so the UI updates the
   // instant the user picks a new one. The host re-resolves at submit
   // time anyway — this is just for the label-in-the-header.
@@ -139,24 +166,52 @@ export function App() {
   const effectiveCheckpointVersionIdForEstimate =
     (localCheckpoint ?? modelCtxRead.checkpoint ?? null)?.versionId ?? null;
 
-  // Default-select the first showcase image once the host's query lands
-  // (showcaseImages may be empty on first render and populate later when
-  // BLOCK_INIT delivers them).
+  // Storage key for showcase-selection persistence. Scoped to the block
+  // instance + model version so two different models on a multi-model
+  // page don't collide. See Gap 4 in the day-2 handoff.
+  const storageKey =
+    blockInstanceId && modelCtxRead.modelVersionId
+      ? `civitai-block-generate:${blockInstanceId}:${modelCtxRead.modelVersionId}`
+      : null;
+
+  // Default-select either (a) the persisted showcase image from
+  // localStorage, falling back to (b) the first available image, once
+  // the host's query lands. showcaseImages may be empty on first render
+  // and populate later when BLOCK_INIT delivers them.
   useEffect(() => {
     if (selectedShowcaseIdx != null) return;
     if (showcaseImages.length === 0) return;
-    setSelectedShowcaseIdx(0);
+    const persistedId = readPersistedShowcaseId(storageKey);
+    const persistedIdx =
+      persistedId != null ? showcaseImages.findIndex((img) => img.id === persistedId) : -1;
+    setSelectedShowcaseIdx(persistedIdx >= 0 ? persistedIdx : 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showcaseImages.length]);
+  }, [showcaseImages.length, storageKey]);
 
-  // Populate the prompt input from the selected showcase image's meta.
-  // The user can still edit afterward — this only fires on showcase
-  // selection change, not every render. Empty meta leaves the input
-  // alone so a partial-meta showcase doesn't clobber a typed prompt.
+  // Persist the selected showcase ID to localStorage on every change.
+  // Survives hard refresh; keyed on (blockInstanceId, modelVersionId) so
+  // it's isolated per-block-per-model. Errors are swallowed (private
+  // mode, quota exceeded, etc.).
+  useEffect(() => {
+    if (storageKey == null) return;
+    if (selectedShowcaseIdx == null) return;
+    const img = showcaseImages[selectedShowcaseIdx];
+    if (!img) return;
+    writePersistedShowcaseId(storageKey, img.id);
+  }, [storageKey, selectedShowcaseIdx, showcaseImages]);
+
+  // Populate the prompt input from the selected showcase image's meta
+  // and clear any user-edited overrides — selecting a new image is an
+  // explicit "reset to this image's params" signal. The user can still
+  // edit afterward; this only fires on showcase selection change.
+  // Empty meta leaves the input alone so a partial-meta showcase
+  // doesn't clobber a typed prompt.
   useEffect(() => {
     if (selectedShowcase?.prompt) {
       setPrompt(selectedShowcase.prompt);
     }
+    setOverrides({});
+    setRandomizeSeedOnce(false);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedShowcaseIdx]);
 
@@ -176,7 +231,14 @@ export function App() {
       kind: 'textToImage',
       modelId,
       modelVersionId,
-      params: buildSubmitParams(prompt, '' /* suffix */, selectedShowcase),
+      // NOTE: estimate doesn't carry randomizeSeedOnce — that's a
+      // one-shot for submit only. The estimate uses the showcase's seed
+      // so cost-preview stays stable while the user is reviewing.
+      // Overrides DO flow through here, but the auto-estimate effect
+      // intentionally doesn't re-run on overrides changes (see deps
+      // below) — re-estimating on every keystroke of width/height would
+      // be noisy. The shown cost can lag user edits; that's accepted.
+      params: buildSubmitParams(prompt, '' /* suffix */, selectedShowcase, overrides, false),
     })
       .then((snap) => {
         if (myId !== estimateInFlightRef.current) return;
@@ -288,6 +350,17 @@ export function App() {
 
   const handleGenerate = async () => {
     try {
+      const params = buildSubmitParams(
+        prompt,
+        suffix,
+        selectedShowcase,
+        overrides,
+        randomizeSeedOnce
+      );
+      // Reset the one-shot randomize flag after consuming it so the
+      // *next* submit reverts to the showcase's seed (unless the user
+      // clicks 🎲 again). Important: must run after the build call.
+      if (randomizeSeedOnce) setRandomizeSeedOnce(false);
       await submit({
         kind: 'textToImage',
         modelId: model.modelId,
@@ -295,7 +368,7 @@ export function App() {
         // Use the same param-builder as the estimate effect so cost shown
         // pre-click matches cost charged at submit. The host still
         // re-validates everything server-side; this is just for parity.
-        params: buildSubmitParams(prompt, suffix, selectedShowcase),
+        params,
       });
     } catch {
       // Surface via `error` in render; nothing to do here.
@@ -375,7 +448,19 @@ export function App() {
           disabled={isBusy}
         />
 
-        {showAdvanced && <p style={subtleStyle}>(advanced controls — TODO)</p>}
+        <AdvancedSection
+          open={advancedOpen}
+          onToggle={() => setAdvancedOpen((v) => !v)}
+          editable={showAdvanced}
+          showcase={selectedShowcase}
+          overrides={overrides}
+          onOverrideChange={(patch) => setOverrides((prev) => ({ ...prev, ...patch }))}
+          randomizeSeedOnce={randomizeSeedOnce}
+          onRandomizeSeed={() => setRandomizeSeedOnce(true)}
+          onUndoRandomize={() => setRandomizeSeedOnce(false)}
+          isBusy={isBusy}
+          theme={theme}
+        />
 
         {(estimatedCost != null || estimateError) && (
           <p style={subtleStyle}>
@@ -443,6 +528,303 @@ function Header({ model }: { model: ModelSlotContext }) {
   );
 }
 
+/**
+ * Collapsible advanced-controls section. Unifies Gap 1 (visibility) and
+ * Gap 3 (editability):
+ *   - `editable=false` (publisher's show_advanced unset): shows read-only
+ *     chips so the user can SEE what params will be sent — fixes the
+ *     "silent stamping" problem from the day-2 handoff.
+ *   - `editable=true`: shows real inputs so the user can override the
+ *     showcase's params. Values fall through to the showcase when the
+ *     input is blank (undefined override).
+ *
+ * All controls respect `isBusy` — mid-flight mutation is disabled.
+ */
+function AdvancedSection(props: {
+  open: boolean;
+  onToggle: () => void;
+  editable: boolean;
+  showcase: ShowcaseImage | null;
+  overrides: ParamOverrides;
+  onOverrideChange: (patch: ParamOverrides) => void;
+  randomizeSeedOnce: boolean;
+  onRandomizeSeed: () => void;
+  onUndoRandomize: () => void;
+  isBusy: boolean;
+  theme: string | null;
+}) {
+  const {
+    open,
+    onToggle,
+    editable,
+    showcase,
+    overrides,
+    onOverrideChange,
+    randomizeSeedOnce,
+    onRandomizeSeed,
+    onUndoRandomize,
+    isBusy,
+    theme,
+  } = props;
+
+  // Effective values for display: override wins, then showcase.
+  const eff = {
+    negativePrompt: overrides.negativePrompt ?? showcase?.negativePrompt ?? '',
+    cfgScale: overrides.cfgScale ?? showcase?.cfgScale ?? null,
+    steps: overrides.steps ?? showcase?.steps ?? null,
+    // Seed displayed: if randomize-once is armed, surface that visibly
+    // ('random' label) rather than the underlying showcase seed.
+    seed: randomizeSeedOnce ? null : overrides.seed ?? showcase?.seed ?? null,
+    sampler: overrides.sampler ?? showcase?.sampler ?? '',
+    width: overrides.width ?? showcase?.width ?? null,
+    height: overrides.height ?? showcase?.height ?? null,
+  };
+
+  return (
+    <div style={advancedWrapperStyle(theme)}>
+      <button type="button" onClick={onToggle} style={advancedToggleStyle(theme)}>
+        <span>⚙ Advanced {editable ? '' : '(read-only)'}</span>
+        <span style={{ opacity: 0.6 }}>{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div style={advancedBodyStyle}>
+          {editable ? (
+            <EditableControls
+              eff={eff}
+              overrides={overrides}
+              onOverrideChange={onOverrideChange}
+              randomizeSeedOnce={randomizeSeedOnce}
+              onRandomizeSeed={onRandomizeSeed}
+              onUndoRandomize={onUndoRandomize}
+              isBusy={isBusy}
+              theme={theme}
+            />
+          ) : (
+            <ReadOnlyChips eff={eff} randomizeSeedOnce={randomizeSeedOnce} theme={theme} />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReadOnlyChips(props: {
+  eff: {
+    negativePrompt: string;
+    cfgScale: number | null;
+    steps: number | null;
+    seed: number | null;
+    sampler: string;
+    width: number | null;
+    height: number | null;
+  };
+  randomizeSeedOnce: boolean;
+  theme: string | null;
+}) {
+  const { eff, randomizeSeedOnce, theme } = props;
+  const chips: Array<[string, string]> = [];
+  if (eff.cfgScale != null) chips.push(['cfg', String(eff.cfgScale)]);
+  if (eff.steps != null) chips.push(['steps', String(eff.steps)]);
+  chips.push(['seed', randomizeSeedOnce ? 'random' : eff.seed != null ? String(eff.seed) : 'auto']);
+  if (eff.sampler) chips.push(['sampler', eff.sampler]);
+  if (eff.width != null && eff.height != null) {
+    chips.push(['size', `${eff.width}×${eff.height}`]);
+  }
+  if (eff.negativePrompt) chips.push(['neg', truncate(eff.negativePrompt, 40)]);
+
+  if (chips.length === 0) {
+    return <p style={subtleStyle}>No params from showcase — host defaults will apply.</p>;
+  }
+  return (
+    <div style={chipRowStyle}>
+      {chips.map(([k, v]) => (
+        <span key={k} style={chipStyle(theme)}>
+          <strong style={{ opacity: 0.65, marginRight: 4 }}>{k}:</strong>
+          {v}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function EditableControls(props: {
+  eff: {
+    negativePrompt: string;
+    cfgScale: number | null;
+    steps: number | null;
+    seed: number | null;
+    sampler: string;
+    width: number | null;
+    height: number | null;
+  };
+  overrides: ParamOverrides;
+  onOverrideChange: (patch: ParamOverrides) => void;
+  randomizeSeedOnce: boolean;
+  onRandomizeSeed: () => void;
+  onUndoRandomize: () => void;
+  isBusy: boolean;
+  theme: string | null;
+}) {
+  const {
+    eff,
+    overrides,
+    onOverrideChange,
+    randomizeSeedOnce,
+    onRandomizeSeed,
+    onUndoRandomize,
+    isBusy,
+    theme,
+  } = props;
+
+  // Display values for the inputs. Treat `overrides.X` as the user's
+  // current edit (including '' meaning they cleared it). If the user
+  // hasn't touched a field, show the showcase value.
+  const negDisplay =
+    overrides.negativePrompt !== undefined ? overrides.negativePrompt : eff.negativePrompt;
+
+  return (
+    <div style={editableGridStyle}>
+      <label style={labelStyle}>
+        Negative prompt
+        <textarea
+          value={negDisplay}
+          onChange={(e) => onOverrideChange({ negativePrompt: e.target.value })}
+          disabled={isBusy}
+          rows={2}
+          style={{ ...inputStyle(theme), resize: 'vertical', fontFamily: 'inherit' }}
+        />
+      </label>
+
+      <div style={twoColStyle}>
+        <label style={labelStyle}>
+          CFG scale
+          <input
+            type="number"
+            min={1}
+            max={30}
+            step={0.5}
+            value={eff.cfgScale ?? ''}
+            placeholder="auto"
+            onChange={(e) =>
+              onOverrideChange({ cfgScale: e.target.value === '' ? undefined : Number(e.target.value) })
+            }
+            disabled={isBusy}
+            style={inputStyle(theme)}
+          />
+        </label>
+        <label style={labelStyle}>
+          Steps
+          <input
+            type="number"
+            min={1}
+            max={200}
+            step={1}
+            value={eff.steps ?? ''}
+            placeholder="auto"
+            onChange={(e) =>
+              onOverrideChange({
+                steps: e.target.value === '' ? undefined : Math.round(Number(e.target.value)),
+              })
+            }
+            disabled={isBusy}
+            style={inputStyle(theme)}
+          />
+        </label>
+      </div>
+
+      <label style={labelStyle}>
+        Seed
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+          <input
+            type="number"
+            value={randomizeSeedOnce ? '' : eff.seed ?? ''}
+            placeholder={randomizeSeedOnce ? 'random (next gen)' : 'auto'}
+            onChange={(e) => {
+              // Editing the seed cancels a pending randomize.
+              if (randomizeSeedOnce) onUndoRandomize();
+              onOverrideChange({
+                seed: e.target.value === '' ? undefined : Number(e.target.value),
+              });
+            }}
+            disabled={isBusy || randomizeSeedOnce}
+            style={{ ...inputStyle(theme), flex: 1 }}
+          />
+          <button
+            type="button"
+            onClick={randomizeSeedOnce ? onUndoRandomize : onRandomizeSeed}
+            disabled={isBusy}
+            title={
+              randomizeSeedOnce
+                ? 'Cancel randomize, use showcase seed'
+                : 'Randomize seed for next generation (one-shot)'
+            }
+            style={diceButtonStyle(randomizeSeedOnce, theme)}
+          >
+            🎲 {randomizeSeedOnce ? 'cancel' : 'random'}
+          </button>
+        </div>
+      </label>
+
+      <label style={labelStyle}>
+        Sampler
+        <input
+          type="text"
+          value={overrides.sampler !== undefined ? overrides.sampler : eff.sampler}
+          placeholder="e.g. Euler, DPM++ 2M Karras"
+          onChange={(e) =>
+            onOverrideChange({ sampler: e.target.value === '' ? undefined : e.target.value })
+          }
+          disabled={isBusy}
+          style={inputStyle(theme)}
+        />
+      </label>
+
+      <div style={twoColStyle}>
+        <label style={labelStyle}>
+          Width
+          <input
+            type="number"
+            min={64}
+            max={2048}
+            step={8}
+            value={eff.width ?? ''}
+            placeholder="auto"
+            onChange={(e) =>
+              onOverrideChange({
+                width: e.target.value === '' ? undefined : Math.round(Number(e.target.value)),
+              })
+            }
+            disabled={isBusy}
+            style={inputStyle(theme)}
+          />
+        </label>
+        <label style={labelStyle}>
+          Height
+          <input
+            type="number"
+            min={64}
+            max={2048}
+            step={8}
+            value={eff.height ?? ''}
+            placeholder="auto"
+            onChange={(e) =>
+              onOverrideChange({
+                height: e.target.value === '' ? undefined : Math.round(Number(e.target.value)),
+              })
+            }
+            disabled={isBusy}
+            style={inputStyle(theme)}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function truncate(s: string, n: number): string {
+  return s.length > n ? `${s.slice(0, n - 1)}…` : s;
+}
+
 function Result({ snapshot }: { snapshot: BlockWorkflowSnapshot }) {
   return (
     <div style={{ marginTop: 8 }}>
@@ -493,16 +875,26 @@ function labelForStatus(
 }
 
 /**
- * Build the params block for submit/estimate. Mirrors the showcase
- * image's gen meta where present, with null fields dropped (the host
- * fills sensible defaults). The user's typed prompt always wins over
- * the showcase's prompt; falls back to the showcase prompt only when
- * the user hasn't typed anything.
+ * Build the params block for submit/estimate. The single source of
+ * truth for what's sent — both estimate() and submit() flow through
+ * here so the displayed cost matches the charged cost.
+ *
+ * Layering (lowest → highest priority):
+ *   1. Showcase image's gen meta (when a showcase is selected)
+ *   2. User overrides (from the advanced controls)
+ *   3. Special cases: user prompt always wins; randomizeSeed drops seed
+ *
+ * `null` fields on the showcase mean "no value in source meta" — they
+ * stay out of the submit body so the host fills sensible defaults.
+ * Same goes for `undefined` overrides — they fall through to the
+ * showcase, then through to the host.
  */
 function buildSubmitParams(
   userPrompt: string,
   suffix: string,
-  selected: ShowcaseImage | null
+  selected: ShowcaseImage | null,
+  overrides: ParamOverrides = {},
+  randomizeSeed = false
 ): {
   prompt: string;
   negativePrompt?: string;
@@ -519,15 +911,28 @@ function buildSubmitParams(
     userPart.length > 0
       ? [userPart, suffix].filter(Boolean).join(', ').trim()
       : selected?.prompt ?? '';
+
+  const negativePrompt =
+    overrides.negativePrompt !== undefined ? overrides.negativePrompt : selected?.negativePrompt;
+  const cfgScale = overrides.cfgScale ?? selected?.cfgScale ?? undefined;
+  const steps = overrides.steps ?? selected?.steps ?? undefined;
+  // Seed: override > showcase. Then randomize wins by omitting it
+  // entirely (so the orchestrator picks fresh).
+  const seedRaw = overrides.seed ?? selected?.seed ?? undefined;
+  const seed = randomizeSeed ? undefined : seedRaw;
+  const sampler = overrides.sampler ?? selected?.sampler ?? undefined;
+  const width = overrides.width ?? selected?.width ?? undefined;
+  const height = overrides.height ?? selected?.height ?? undefined;
+
   return {
     prompt: composed,
-    ...(selected?.negativePrompt ? { negativePrompt: selected.negativePrompt } : {}),
-    ...(selected?.cfgScale != null ? { cfgScale: selected.cfgScale } : {}),
-    ...(selected?.steps != null ? { steps: selected.steps } : {}),
-    ...(selected?.seed != null ? { seed: selected.seed } : {}),
-    ...(selected?.sampler ? { sampler: selected.sampler } : {}),
-    ...(selected?.width ? { width: selected.width } : {}),
-    ...(selected?.height ? { height: selected.height } : {}),
+    ...(negativePrompt ? { negativePrompt } : {}),
+    ...(cfgScale != null ? { cfgScale } : {}),
+    ...(steps != null ? { steps } : {}),
+    ...(seed != null ? { seed } : {}),
+    ...(sampler ? { sampler } : {}),
+    ...(width ? { width } : {}),
+    ...(height ? { height } : {}),
     quantity: 1,
   };
 }
@@ -553,6 +958,39 @@ function readString(v: unknown, fallback: string): string {
 
 function readBoolean(v: unknown, fallback: boolean): boolean {
   return typeof v === 'boolean' ? v : fallback;
+}
+
+/**
+ * Read the persisted selected-showcase ID from localStorage. Returns
+ * null on any error (private mode, malformed JSON, missing key, etc.) —
+ * the caller falls back to "first available image" in that case.
+ */
+function readPersistedShowcaseId(key: string | null): number | null {
+  if (key == null) return null;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (
+      typeof parsed === 'object' &&
+      parsed != null &&
+      typeof (parsed as { selectedShowcaseId?: unknown }).selectedShowcaseId === 'number'
+    ) {
+      return (parsed as { selectedShowcaseId: number }).selectedShowcaseId;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function writePersistedShowcaseId(key: string, id: number): void {
+  try {
+    window.localStorage.setItem(key, JSON.stringify({ selectedShowcaseId: id }));
+  } catch {
+    // Private mode / quota — silently no-op. Persistence is a nice-to-
+    // have, not load-bearing.
+  }
 }
 
 // --------- styles (inline; the host injects [data-theme]) ---------
@@ -676,4 +1114,76 @@ const imageStyle: CSSProperties = {
   display: 'block',
   marginBottom: 8,
 };
+
+const advancedWrapperStyle = (theme: string | null): CSSProperties => ({
+  border: `1px solid ${theme === 'dark' ? '#374151' : '#e5e7eb'}`,
+  borderRadius: 6,
+  background: theme === 'dark' ? '#0f172a' : '#f9fafb',
+});
+
+const advancedToggleStyle = (theme: string | null): CSSProperties => ({
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  width: '100%',
+  padding: '6px 10px',
+  background: 'transparent',
+  border: 'none',
+  color: theme === 'dark' ? '#e5e7eb' : '#111827',
+  fontSize: 13,
+  fontWeight: 500,
+  cursor: 'pointer',
+});
+
+const advancedBodyStyle: CSSProperties = {
+  padding: '8px 10px 10px',
+  borderTop: '1px solid rgba(125, 125, 125, 0.2)',
+};
+
+const chipRowStyle: CSSProperties = {
+  display: 'flex',
+  flexWrap: 'wrap',
+  gap: 6,
+};
+
+const chipStyle = (theme: string | null): CSSProperties => ({
+  padding: '2px 8px',
+  borderRadius: 999,
+  background: theme === 'dark' ? '#1f2937' : '#e5e7eb',
+  fontSize: 12,
+  fontFamily: 'ui-monospace, SFMono-Regular, monospace',
+});
+
+const editableGridStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+};
+
+const twoColStyle: CSSProperties = {
+  display: 'grid',
+  gridTemplateColumns: '1fr 1fr',
+  gap: 8,
+};
+
+const labelStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 4,
+  fontSize: 12,
+  fontWeight: 500,
+  opacity: 0.85,
+};
+
+const diceButtonStyle = (active: boolean, theme: string | null): CSSProperties => ({
+  padding: '6px 10px',
+  borderRadius: 6,
+  border: `1px solid ${active ? '#3b82f6' : theme === 'dark' ? '#374151' : '#d1d5db'}`,
+  background: active ? '#3b82f6' : 'transparent',
+  color: active ? '#ffffff' : 'inherit',
+  fontSize: 12,
+  fontWeight: 500,
+  cursor: 'pointer',
+  whiteSpace: 'nowrap',
+});
 
