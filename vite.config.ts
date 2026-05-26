@@ -1,3 +1,4 @@
+/// <reference types="vitest" />
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
@@ -24,5 +25,15 @@ export default defineConfig({
         manualChunks: undefined,
       },
     },
+  },
+  // Unit test config — vitest reads this same file. The block app has no
+  // backing services, so jsdom + the SDK-mocking strategy in
+  // src/test/test-utils.ts is enough to cover UI logic.
+  test: {
+    environment: 'jsdom',
+    globals: true,
+    setupFiles: ['./src/test/setup.ts'],
+    css: false,
+    include: ['src/**/*.test.{ts,tsx}', 'src/__tests__/**/*.{test,spec}.{ts,tsx}'],
   },
 });

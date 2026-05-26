@@ -22,6 +22,8 @@
     "build": "vite build",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "docker:build": "docker build -t ghcr.io/zacxdev/civitai-block-generate-from-model:latest ."
   },
   "dependencies": {
@@ -31,11 +33,16 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.4.0",
+    "jsdom": "^29.1.1",
     "typescript": "^5.9.2",
-    "vite": "^7.2.0"
+    "vite": "^7.2.0",
+    "vitest": "^3.2.4"
   }
 }
