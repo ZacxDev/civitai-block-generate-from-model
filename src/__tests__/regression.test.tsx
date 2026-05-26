@@ -68,7 +68,8 @@ describe('isBusy disables every interactive control', () => {
     await renderApp(<App />);
 
     expect(screen.getByLabelText('Prompt (optional)')).toBeDisabled();
-    expect(screen.getByRole('button', { name: /Generating…/ })).toBeDisabled();
+    // Tier-2 #8: polling label now includes sticky cost ("Generating · N Buzz").
+    expect(screen.getByRole('button', { name: /Generating/ })).toBeDisabled();
     // Carousel thumbs.
     expect(screen.getByRole('button', { name: 'Pick preview 1' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Pick preview 2' })).toBeDisabled();

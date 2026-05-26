@@ -81,6 +81,11 @@ export function App() {
   // submit/estimate. Defaults to 0 in the carousel-mount effect below
   // (deferred because BlockInit might land before showcaseImages does).
   const [selectedShowcaseIdx, setSelectedShowcaseIdx] = useState<number | null>(null);
+  // Refs to the carousel scroll container + each thumb button so we can
+  // auto-scroll the selected thumb into view on mount/restore. JSDOM
+  // doesn't implement scrollIntoView — see effect below for the guard.
+  const carouselRef = useRef<HTMLDivElement>(null);
+  const thumbRefs = useRef<Array<HTMLButtonElement | null>>([]);
   // Estimated cost (yellow buzz) for the current params. Pulled from
   // estimate() snapshot, refreshed on mount + when the model identity
   // (checkpoint or selected showcase) changes.
@@ -200,6 +205,21 @@ export function App() {
     if (!img) return;
     writePersistedShowcaseId(storageKey, img.id);
   }, [storageKey, selectedShowcaseIdx, showcaseImages]);
+
+  // Auto-scroll the selected thumb into view when selection changes (covers
+  // both initial-default and localStorage-restored selections). JSDOM
+  // doesn't implement scrollIntoView — wrap in try/catch so tests don't
+  // explode. Behavior:'smooth' respects prefers-reduced-motion in browsers.
+  useEffect(() => {
+    if (selectedShowcaseIdx == null) return;
+    const el = thumbRefs.current[selectedShowcaseIdx];
+    if (!el) return;
+    try {
+      el.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
+    } catch {
+      // JSDOM / older browsers — affordance is non-load-bearing.
+    }
+  }, [selectedShowcaseIdx]);
 
   // Populate the prompt input from the selected showcase image's meta
   // and clear any user-edited overrides — selecting a new image is an
@@ -397,11 +417,19 @@ export function App() {
       )}
 
       {showcaseImages.length > 0 && (
-        <div>
-          <div style={carouselStyle}>
+        <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
+          <div
+            ref={carouselRef}
+            className="gfm-carousel"
+            style={carouselStyle}
+            data-testid="gfm-carousel"
+          >
             {showcaseImages.map((img, idx) => (
               <button
                 key={img.id}
+                ref={(el) => {
+                  thumbRefs.current[idx] = el;
+                }}
                 type="button"
                 aria-label={`Pick preview ${idx + 1}`}
                 aria-pressed={idx === selectedShowcaseIdx}
@@ -464,24 +492,40 @@ export function App() {
       </div>
 
       {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && (
-        <div style={errorBoxStyle(theme)} role="alert">
-          <p style={{ margin: 0 }}>
-            {error?.message ?? result?.error ?? 'Generation failed.'}
-          </p>
-          {isInsufficient && (
+        isInsufficient ? (
+          // Tier-2 #10: for the insufficient-buzz path the Top-Up CTA is
+          // the obvious next action — make it the primary button, demote
+          // the error message to supporting copy. Visual weight matches
+          // the Generate button so the user reads "do this instead."
+          <div style={insufficientBoxStyle(theme)} role="alert">
+            <p style={insufficientCopyStyle(theme)}>Not enough Buzz for this generation.</p>
             <button
               type="button"
               onClick={() => openPurchaseModal(budget * 10)}
-              className="gfm-link"
-              style={{ ...linkButtonStyle(), color: theme === 'dark' ? '#74C0FC' : '#1971C2' }}
+              className="gfm-primary"
+              style={primaryButtonStyle(false)}
             >
-              Top up Buzz →
+              <span>Top up Buzz · {budget * 10}</span>
             </button>
-          )}
-        </div>
+          </div>
+        ) : (
+          <div style={errorBoxStyle(theme)} role="alert">
+            <p style={{ margin: 0 }}>
+              {error?.message ?? result?.error ?? 'Generation failed.'}
+            </p>
+          </div>
+        )
       )}
 
-      {result && result.status === 'succeeded' && <Result snapshot={result} theme={theme} />}
+      {result && result.status === 'succeeded' && (
+        <Result
+          snapshot={result}
+          theme={theme}
+          modelName={model.modelName}
+          isBusy={isBusy}
+          onTryAgain={handleGenerate}
+        />
+      )}
     </div>
   );
 }
@@ -963,7 +1007,20 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-function Result({ snapshot, theme }: { snapshot: BlockWorkflowSnapshot; theme: string | null }) {
+function Result({
+  snapshot,
+  theme,
+  modelName,
+  isBusy,
+  onTryAgain,
+}: {
+  snapshot: BlockWorkflowSnapshot;
+  theme: string | null;
+  modelName: string;
+  isBusy: boolean;
+  onTryAgain: () => void | Promise<void>;
+}) {
+  const firstUrl = snapshot.imageUrls?.[0] ?? null;
   return (
     <div className="gfm-fade-in" style={{ marginTop: 8 }}>
       {snapshot.imageUrls?.map((url, i) => (
@@ -975,11 +1032,44 @@ function Result({ snapshot, theme }: { snapshot: BlockWorkflowSnapshot; theme: s
           loading="lazy"
         />
       ))}
-      {snapshot.cost?.total != null && (
-        <p style={subtleStyle}>
-          Spent <strong style={{ opacity: 1, color: 'inherit' }}>{snapshot.cost.total} Buzz</strong>
-        </p>
-      )}
+      <div style={resultActionsRowStyle}>
+        {snapshot.cost?.total != null ? (
+          <p style={{ ...subtleStyle, marginRight: 'auto' }}>
+            Spent{' '}
+            <strong style={{ opacity: 1, color: 'inherit' }}>
+              {snapshot.cost.total} Buzz
+            </strong>
+          </p>
+        ) : (
+          <span style={{ marginRight: 'auto' }} />
+        )}
+        {firstUrl && (
+          <button
+            type="button"
+            onClick={() => downloadImage(firstUrl, modelName)}
+            disabled={isBusy}
+            className="gfm-link"
+            style={{
+              ...linkButtonStyle(),
+              color: theme === 'dark' ? BRAND_LIGHT_DARK : BRAND,
+            }}
+          >
+            Download
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={onTryAgain}
+          disabled={isBusy}
+          className="gfm-link"
+          style={{
+            ...linkButtonStyle(),
+            color: theme === 'dark' ? BRAND_LIGHT_DARK : BRAND,
+          }}
+        >
+          Try again
+        </button>
+      </div>
     </div>
   );
 }
@@ -995,22 +1085,28 @@ function labelForStatus(
   //   submitting  — submit() in flight (busy)
   //   polling     — workflow running server-side (busy)
   //   idle / done / error → also idle (show Generate)
-  switch (status) {
-    case 'estimating':
-      return 'Estimating cost…';
-    case 'submitting':
-      return 'Submitting…';
-    case 'polling':
-      return 'Generating…';
-    default:
-      // idle, confirming, done, error: the button is actionable. Show
-      // the actual estimated cost when we have one, fall back to the
-      // budget cap otherwise. Middle-dot separator reads cleaner than
-      // parens for the known-cost case.
-      return estimatedCost != null
-        ? `Generate · ${estimatedCost} Buzz`
-        : `Generate (≤ ${budget} Buzz)`;
+  //
+  // Tier-2 #8: keep the cost visible during submitting/polling so the user
+  // never loses sight of what they're paying for what they see. Fallback
+  // mirrors the idle shape — `(≤ N Buzz)` — when no estimate has landed.
+  if (status === 'estimating') return 'Estimating cost…';
+  if (status === 'submitting') {
+    return estimatedCost != null
+      ? `Submitting · ${estimatedCost} Buzz`
+      : `Submitting (≤ ${budget} Buzz)`;
   }
+  if (status === 'polling') {
+    return estimatedCost != null
+      ? `Generating · ${estimatedCost} Buzz`
+      : `Generating (≤ ${budget} Buzz)`;
+  }
+  // idle, confirming, done, error: the button is actionable. Show
+  // the actual estimated cost when we have one, fall back to the
+  // budget cap otherwise. Middle-dot separator reads cleaner than
+  // parens for the known-cost case.
+  return estimatedCost != null
+    ? `Generate · ${estimatedCost} Buzz`
+    : `Generate (≤ ${budget} Buzz)`;
 }
 
 /**
@@ -1156,6 +1252,64 @@ function writePersistedShowcaseId(key: string, id: number): void {
   } catch {
     // Private mode / quota — silently no-op. Persistence is a nice-to-
     // have, not load-bearing.
+  }
+}
+
+/**
+ * Derive a tidy download filename from the model name + today's ISO date.
+ * `Luna_arianaV3` → `luna_arianav3-2026-05-26.jpeg`.
+ *
+ * Lowercase + collapsing of any non-alphanumeric runs to a single dash
+ * keeps the filename safe across OS file pickers (no spaces, no slashes).
+ * Underscores survive — they're filesystem-safe AND they preserve the
+ * model author's visual word boundaries (e.g. `Luna_arianaV3`).
+ *
+ * Orchestrator outputs are JPEGs today; we hard-code `.jpeg` rather than
+ * trying to sniff content-type from the URL (CDN URLs don't carry it).
+ */
+export function deriveDownloadFilename(modelName: string, now: Date = new Date()): string {
+  const slug = (modelName || 'generation')
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  const safeSlug = slug.length > 0 ? slug : 'generation';
+  const iso = now.toISOString().slice(0, 10); // YYYY-MM-DD
+  return `${safeSlug}-${iso}.jpeg`;
+}
+
+/**
+ * Trigger a file download for the given image URL.
+ *
+ * Primary path: create a hidden `<a download>` and click it. This works
+ * for same-origin URLs and for cross-origin URLs whose host returns
+ * `Content-Disposition: attachment` or honors the `download` attribute.
+ *
+ * Fallback: on some cross-origin CDNs the browser ignores `download` and
+ * navigates instead. To keep the user in the block, open the URL in a new
+ * tab — at least they get the image, even if the filename isn't applied.
+ *
+ * Errors are swallowed (popup blockers, JSDOM, etc.) — this is best-
+ * effort UX, not load-bearing.
+ */
+export function downloadImage(url: string, modelName: string): void {
+  const filename = deriveDownloadFilename(modelName);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.rel = 'noopener';
+    // Anchors not in the document don't always trigger downloads on
+    // Firefox — append, click, then remove to be safe.
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } catch {
+    // Fallback: open in a new tab so the user at least gets the image.
+    try {
+      window.open(url, '_blank', 'noopener,noreferrer');
+    } catch {
+      // Both paths failed — nothing more we can do without a toast lib.
+    }
   }
 }
 
@@ -1313,10 +1467,29 @@ const checkpointRowStyle = (theme: string | null): CSSProperties => ({
   fontSize: 13,
 });
 
+// Tier-2 #9: horizontally-scrollable single-row carousel. The wrapper
+// holds a soft right-edge fade affordance (rendered via the CSS pseudo
+// in STYLESHEET_CSS) so the user gets a visual hint that more thumbs
+// are off-screen when the container is narrow.
+const carouselWrapStyle = (_theme: string | null): CSSProperties => ({
+  position: 'relative',
+  // The fade pseudo-element overflows above the scroll layer; keep this
+  // wrapper from clipping it.
+  overflow: 'visible',
+});
+
 const carouselStyle: CSSProperties = {
   display: 'flex',
   gap: 6,
-  flexWrap: 'wrap',
+  flexWrap: 'nowrap',
+  overflowX: 'auto',
+  overflowY: 'hidden',
+  // Extra room around thumbs so the :hover scale(1.04) doesn't clip
+  // against the scroll container edges.
+  padding: '4px 2px',
+  // Scroll snap is a quiet polish on touch — desktop wheel scroll
+  // ignores it, but on iOS/Android the thumb settles on a card.
+  scrollSnapType: 'x proximity',
 };
 
 const thumbButtonStyle = (selected: boolean, theme: string | null): CSSProperties => ({
@@ -1328,12 +1501,16 @@ const thumbButtonStyle = (selected: boolean, theme: string | null): CSSPropertie
   overflow: 'hidden',
   transition: 'border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out',
   boxShadow: selected ? `0 0 0 3px ${FOCUS_RING}` : 'none',
+  // Don't let flex squish thumbs when the row overflows — they should
+  // keep their 56×56 footprint and the parent scrolls instead.
+  flex: '0 0 auto',
+  scrollSnapAlign: 'center',
 });
 
 const thumbImageStyle: CSSProperties = {
   display: 'block',
-  width: 64,
-  height: 64,
+  width: 56,
+  height: 56,
   objectFit: 'cover',
 };
 
@@ -1401,6 +1578,37 @@ const errorBoxStyle = (theme: string | null): CSSProperties => ({
   flexDirection: 'column',
   gap: 6,
 });
+
+// Tier-2 #10: the insufficient-buzz box reframes the visual hierarchy.
+// The error copy becomes a quiet label; the Top-Up button uses the same
+// brand-blue primary style as Generate so it reads as THE action.
+const insufficientBoxStyle = (theme: string | null): CSSProperties => ({
+  padding: 12,
+  borderRadius: 6,
+  background: theme === 'dark' ? '#25262B' : '#f8f9fa',
+  border: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 8,
+});
+
+const insufficientCopyStyle = (theme: string | null): CSSProperties => ({
+  margin: 0,
+  fontSize: 13,
+  opacity: 0.85,
+  color: theme === 'dark' ? '#C1C2C5' : '#495057',
+});
+
+// Tier-2 #7: row that contains the spent-buzz line on the left and the
+// inline Download / Try again actions on the right. Wraps to a second
+// row on narrow widths so the buttons stay tappable.
+const resultActionsRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  flexWrap: 'wrap',
+  gap: 12,
+  marginTop: 4,
+};
 
 const imageStyle = (theme: string | null): CSSProperties => ({
   maxWidth: '100%',
@@ -1554,6 +1762,33 @@ const STYLESHEET_CSS = `
 .gfm-thumb:disabled {
   cursor: not-allowed;
   opacity: 0.55;
+}
+
+/* Tier-2 #9: hide the scrollbar on the horizontally-scrollable
+   carousel. Keyboard / wheel scroll still work, the row stays one
+   line. The wrap element holds a soft fade on the right edge so the
+   user sees "more thumbs that way" without a scrollbar gutter. */
+.gfm-carousel {
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge legacy */
+}
+.gfm-carousel::-webkit-scrollbar {
+  display: none; /* Blink/WebKit */
+}
+.gfm-carousel-wrap::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 24px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgba(254, 254, 254, 0), rgba(254, 254, 254, 0.9));
+  border-radius: 0 6px 6px 0;
+  opacity: 0.8;
+}
+[data-theme="dark"] .gfm-carousel-wrap::after {
+  background: linear-gradient(to right, rgba(26, 27, 30, 0), rgba(26, 27, 30, 0.95));
 }
 
 /* Inputs — brand focus ring matching the host's Mantine inputs. */

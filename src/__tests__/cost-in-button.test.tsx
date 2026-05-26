@@ -74,29 +74,35 @@ describe('Cost inside the Generate button (delta #1)', () => {
 });
 
 describe('No standalone polling status line (delta #2)', () => {
-  it('shows "Generating…" inside the button and NO separate paragraph', async () => {
+  it('shows "Generating · {cost} Buzz" inside the button and NO separate paragraph', async () => {
+    // Tier-2 #8 update: the polling label now keeps the cost visible
+    // (was just "Generating…"). The "no standalone paragraph" assertion
+    // still holds — the button is the single source of truth.
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf_1', status: 'processing' } as never,
     });
     await renderApp(<App />);
-    // Button picks up the busy label.
-    const btn = screen.getByRole('button', { name: /Generating…/ });
+    // Button picks up the busy label with the sticky cost.
+    const btn = screen.getByRole('button', { name: /Generating · \d+ Buzz/ });
     expect(btn).toBeInTheDocument();
+    expect(btn.textContent ?? '').toMatch(/Generating · \d+ Buzz/);
     // There is no <p>Queued…</p> / <p>Generating…</p> sibling. To verify,
-    // make sure the ONLY node containing "Generating…" is inside the button.
-    const generatingNodes = screen.getAllByText(/Generating…/);
+    // make sure the ONLY node containing the "Generating · N Buzz" form
+    // is inside the button. (Note: "Generating with:" in the Advanced
+    // section is unrelated copy and uses a different shape.)
+    const generatingNodes = screen.getAllByText(/Generating · \d+ Buzz/);
     expect(generatingNodes).toHaveLength(1);
     expect(btn.contains(generatingNodes[0]!)).toBe(true);
   });
 
-  it('shows "Generating…" with the pulse element on the button when polling', async () => {
+  it('shows the pulse element on the button when polling', async () => {
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf_1', status: 'pending' } as never,
     });
     await renderApp(<App />);
-    const btn = screen.getByRole('button', { name: /Generating…/ });
+    const btn = screen.getByRole('button', { name: /Generating/ });
     // The Pulse renders as an aria-hidden <span> with the gfm-pulse
     // animation. Locate it by attribute — it's the busy-state visual.
     const pulses = btn.querySelectorAll('span[aria-hidden="true"]');
