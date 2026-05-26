@@ -71,6 +71,31 @@ describe('Cost inside the Generate button (delta #1)', () => {
     });
     expect(screen.getByText(/network down/)).toBeInTheDocument();
   });
+
+  it('renders the Buzz bolt SVG icon inside the Generate button (Tier-4 Delta C)', async () => {
+    await renderApp(<App />);
+    // The bolt visually ties the action to the Buzz currency. JSDOM
+    // can't verify colors but the SVG + the path data are stable.
+    await waitFor(() => {
+      const btn = screen.getByRole('button', { name: /Generate · 34 Buzz/ });
+      const svg = btn.querySelector('svg');
+      expect(svg).not.toBeNull();
+      const path = svg!.querySelector('path');
+      // Tabler Bolt path — a refactor that swaps this icon (e.g. download)
+      // would change the d attribute, which this catches.
+      expect(path?.getAttribute('d')).toContain('M13 3L4 14');
+    });
+  });
+
+  it('Generate button has the gfm-primary class so it picks up the amber CTA stylesheet rules', async () => {
+    await renderApp(<App />);
+    await waitFor(() => {
+      const btn = screen.getByRole('button', { name: /Generate · 34 Buzz/ });
+      expect(btn).toHaveClass('gfm-primary');
+      // Inline style base color — the amber (Mantine yellow[6]).
+      expect(btn.style.background.toLowerCase()).toMatch(/#fab005|rgb\(250, 176, 5\)/);
+    });
+  });
 });
 
 describe('No standalone polling status line (delta #2)', () => {

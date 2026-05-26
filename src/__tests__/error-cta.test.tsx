@@ -42,10 +42,31 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     // Visual weight: uses the same primary button class as Generate. The
     // class is the load-bearing assertion (it pulls in the hover/active
     // CSS); style.background also fixes the brand color.
-    // Tier-3 #5: CTA base color is now Mantine blue[6] (#228BE6) — the
-    // brighter shade that "pops" against the surface.
+    // Tier-4 Delta C: CTA base color is now Mantine yellow[6] (#FAB005) —
+    // the Buzz-spend amber so the top-up reads as a currency action and
+    // doesn't compete with the host page's brand-blue Create button.
     expect(topUp).toHaveClass('gfm-primary');
-    expect(topUp.style.background.toLowerCase()).toMatch(/#228be6|rgb\(34, 139, 230\)/);
+    expect(topUp.style.background.toLowerCase()).toMatch(/#fab005|rgb\(250, 176, 5\)/);
+  });
+
+  it('renders the Buzz bolt SVG icon inside the Top-Up button (Tier-4 Delta C)', async () => {
+    setMockSettings({ buzz_budget_per_gen: 50 });
+    setMockWorkflow({
+      status: 'idle',
+      error: new Error('insufficient buzz balance'),
+    });
+    await renderApp(<App />);
+
+    // The bolt anchors the Top-Up CTA visually to the Buzz currency. JSDOM
+    // doesn't render colors, but the SVG element + the role assertion are
+    // enough to verify the icon is present.
+    const topUp = screen.getByRole('button', { name: /Top up Buzz · 500/ });
+    const svg = topUp.querySelector('svg');
+    expect(svg).not.toBeNull();
+    // Sanity: the path data matches the canonical Tabler Bolt shape so a
+    // regression that swaps the icon (e.g. download) gets caught.
+    const path = svg!.querySelector('path');
+    expect(path?.getAttribute('d')).toContain('M13 3L4 14');
   });
 
   it('demotes the error message to supporting copy in the insufficient case', async () => {

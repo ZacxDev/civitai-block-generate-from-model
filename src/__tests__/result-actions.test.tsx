@@ -196,3 +196,133 @@ describe('Inline result actions (delta #7)', () => {
     expect(screen.getByRole('button', { name: 'Try again' })).toBeDisabled();
   });
 });
+
+/**
+ * Tier-4 Delta B: re-generate ACCUMULATES results into a horizontal
+ * carousel (capped at MAX_RESULTS=8 with FIFO eviction). Each card has a
+ * Download button (aria-label "Download"). Switching showcases clears
+ * the carousel.
+ */
+describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => {
+  it('a single succeeded result renders exactly one card', async () => {
+    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
+    await renderApp(<App />);
+    // Each card has its own Download button (aria-label).
+    expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
+  });
+
+  it('two successive succeeded results render TWO cards, newest first', async () => {
+    // First result lands at mount.
+    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
+    const { rerender } = await renderApp(<App />);
+    expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
+
+    // Second result lands (simulate a new workflow completing).
+    const SECOND_RESULT = {
+      workflowId: 'wf_done_2',
+      status: 'succeeded' as const,
+      imageUrls: ['https://example.test/result-2.jpg'],
+      cost: { total: 22 },
+    };
+    setMockWorkflow({ status: 'idle', result: SECOND_RESULT as never });
+    await import('react').then(async ({ act }) => {
+      await act(async () => {
+        rerender(<App />);
+        await Promise.resolve();
+      });
+    });
+
+    // Two cards now — both with Download buttons.
+    const downloads = screen.getAllByRole('button', { name: 'Download' });
+    expect(downloads).toHaveLength(2);
+
+    // Newest at the front: the carousel's first <img> is the second
+    // result's URL. The result image cards have alt text like
+    // "Generation N" descending from newest (N) to oldest (1).
+    const carousel = screen.getByTestId('gfm-results-carousel');
+    const imgs = carousel.querySelectorAll('img');
+    expect(imgs[0]!.src).toBe('https://example.test/result-2.jpg');
+    expect(imgs[1]!.src).toBe('https://example.test/result.jpg');
+  });
+
+  it('switching to a different showcase clears the results carousel', async () => {
+    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
+    await renderApp(<App />);
+    expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
+
+    // Switch showcase — a "new exploration session" resets pastResults.
+    await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
+
+    // Carousel is gone (no card → no Download buttons).
+    expect(screen.queryByTestId('gfm-results-carousel')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument();
+  });
+
+  it('caps the carousel at MAX_RESULTS=8 with FIFO eviction (oldest goes first)', async () => {
+    // Start with one result, then push 8 more — total 9 unique
+    // workflowIds. After eviction the array must hold 8 with the
+    // oldest (workflowId 'wf_done_0') gone.
+    const makeResult = (i: number) => ({
+      workflowId: `wf_done_${i}`,
+      status: 'succeeded' as const,
+      imageUrls: [`https://example.test/result-${i}.jpg`],
+      cost: { total: i },
+    });
+
+    setMockWorkflow({ status: 'idle', result: makeResult(0) as never });
+    const { rerender } = await renderApp(<App />);
+
+    const { act } = await import('react');
+    for (let i = 1; i <= 8; i += 1) {
+      setMockWorkflow({ status: 'idle', result: makeResult(i) as never });
+      await act(async () => {
+        rerender(<App />);
+        await Promise.resolve();
+      });
+    }
+
+    // Exactly 8 cards (cap), oldest (`result-0.jpg`) evicted.
+    const downloads = screen.getAllByRole('button', { name: 'Download' });
+    expect(downloads).toHaveLength(8);
+
+    const carousel = screen.getByTestId('gfm-results-carousel');
+    const imgs = Array.from(carousel.querySelectorAll('img'));
+    const urls = imgs.map((img) => img.src);
+    // The oldest (#0) must be absent.
+    expect(urls).not.toContain('https://example.test/result-0.jpg');
+    // The newest (#8) must be at the front.
+    expect(urls[0]).toBe('https://example.test/result-8.jpg');
+    // Card count matches Download-button count.
+    expect(urls).toHaveLength(8);
+  });
+
+  it('Try Again still works after multiple results accumulate — calls submit() with the seed dropped', async () => {
+    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
+    const { rerender } = await renderApp(<App />);
+
+    const SECOND_RESULT = {
+      workflowId: 'wf_done_2',
+      status: 'succeeded' as const,
+      imageUrls: ['https://example.test/result-2.jpg'],
+      cost: { total: 22 },
+    };
+    setMockWorkflow({ status: 'idle', result: SECOND_RESULT as never });
+    const { act } = await import('react');
+    await act(async () => {
+      rerender(<App />);
+      await Promise.resolve();
+    });
+
+    const spies = getMockSpies();
+    spies.submit.mockClear();
+    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(spies.submit).toHaveBeenCalledTimes(1);
+    const callArgs = spies.submit.mock.calls[0]![0] as { params: { seed?: number } };
+    expect(callArgs.params.seed).toBeUndefined();
+
+    // Carousel still has the 2 prior cards while submit is in flight —
+    // the prior snapshots aren't destroyed by the new submission.
+    expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(2);
+  });
+});
