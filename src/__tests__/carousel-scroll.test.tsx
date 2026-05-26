@@ -36,13 +36,13 @@ describe('Carousel scroll + compact thumbs (delta #9)', () => {
     expect(carousel.style.flexWrap).toBe('nowrap');
   });
 
-  it('thumbnails render at 56×56 (more compact than the old 64×64)', async () => {
+  it('thumbnails render at 96×96 (Tier-3 #6: the showcase is the most-clicked surface, so paying space for it is worth it)', async () => {
     await renderApp(<App />);
     const firstThumb = screen.getByRole('button', { name: 'Pick preview 1' });
     const innerImg = firstThumb.querySelector('img');
     expect(innerImg).not.toBeNull();
-    expect((innerImg as HTMLImageElement).style.width).toBe('56px');
-    expect((innerImg as HTMLImageElement).style.height).toBe('56px');
+    expect((innerImg as HTMLImageElement).style.width).toBe('96px');
+    expect((innerImg as HTMLImageElement).style.height).toBe('96px');
   });
 
   it('thumbs do not flex-shrink (flex: 0 0 auto) so the row stays a fixed pitch', async () => {

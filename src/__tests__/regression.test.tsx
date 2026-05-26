@@ -49,7 +49,8 @@ describe('Randomize seed one-shot (advanced editable)', () => {
 
   it('toggles label from "random" to "cancel" when clicked', async () => {
     await renderApp(<App />);
-    await userEvent.click(screen.getByRole('button', { name: /Advanced/i }));
+    // Tier-3 #3: Advanced opens via the three-dots header button.
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
     const dice = screen.getByRole('button', { name: /🎲/ });
     expect(dice.textContent).toMatch(/random/);
     await userEvent.click(dice);
@@ -115,7 +116,9 @@ describe('Dark theme styling', () => {
     const { container } = await renderApp(<App />);
     const root = container.firstElementChild as HTMLElement;
     const bg = root.style.background.toLowerCase();
-    // Light surface is #fefefe → rgb(254, 254, 254).
-    expect(bg === '#fefefe' || bg === 'rgb(254, 254, 254)').toBe(true);
+    // Tier-3 #4: light surface bumped to pure white (#ffffff) so the
+    // 1px border + outset shadow read as a distinct card against the
+    // host page's tinted backgrounds.
+    expect(bg === '#ffffff' || bg === 'rgb(255, 255, 255)').toBe(true);
   });
 });

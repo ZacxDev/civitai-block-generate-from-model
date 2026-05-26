@@ -1,12 +1,17 @@
 /**
- * Covers Tier-1 delta #5 — header line reframing.
+ * Covers Tier-3 deltas #1 + #2 — header simplification.
  *
- *   Before: `Generate from this model` + `${modelName} · v${modelVersionId}`
- *   After:  `Generate from this model` + `${modelName} · ${ecosystem} ${modelType}`
+ *   Before (Tier 1/2): `Generate from this model`
+ *                       + subtitle line `{modelName} · {ecosystem} {modelType}`
+ *   After (Tier 3):    `Quick Sample` (title only — no subtitle)
  *
- * The version id is meaningless to non-power users; the chip is the new
- * identity signal. Ecosystem comes from the effective checkpoint's
- * `baseModel`.
+ * The model identity is already obvious from the surrounding page context
+ * (the block sits on a model page), and the ecosystem chip was a power-
+ * user signal that 90% of users ignore. Reclaiming the vertical space
+ * makes the prompt + carousel + Generate flow tighter.
+ *
+ * Tier-1 helpers (`deriveEcosystem`, `formatModelTypeChip`) are gone too
+ * — they had no other callers, so we removed them in the same pass.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
@@ -30,59 +35,48 @@ beforeEach(() => {
   resetBlocksReactMock();
 });
 
-describe('Header — model line', () => {
-  it('renders "{modelName} · Flux LoRA" for a Flux.1 D LoRA install', async () => {
+describe('Header (Tier-3) — title only, no subtitle', () => {
+  it('renders the "Quick Sample" title', async () => {
     setMockContext({
       modelName: 'Luna_arianaV3',
       modelType: 'LORA',
       checkpoint: { ...DEFAULT_CHECKPOINT, baseModel: 'Flux.1 D' },
     });
     await renderApp(<App />);
-    expect(screen.getByText('Luna_arianaV3')).toBeInTheDocument();
-    expect(screen.getByText('Flux LoRA')).toBeInTheDocument();
+    // h3 with the new title text.
+    const title = screen.getByRole('heading', { level: 3 });
+    expect(title).toHaveTextContent('Quick Sample');
   });
 
-  it('renders "{modelName} · SDXL Checkpoint" for an SDXL Checkpoint install', async () => {
-    setMockContext({
-      modelName: 'Luna_arianaV3',
-      modelType: 'Checkpoint',
-      checkpoint: { ...DEFAULT_CHECKPOINT, baseModel: 'SDXL 1.0' },
-    });
+  it('does NOT render the old "Generate from this model" title', async () => {
     await renderApp(<App />);
-    expect(screen.getByText('Luna_arianaV3')).toBeInTheDocument();
-    expect(screen.getByText('SDXL Checkpoint')).toBeInTheDocument();
+    expect(screen.queryByText(/Generate from this model/i)).not.toBeInTheDocument();
   });
 
-  it('renders "{modelName} · Illustrious LoRA" for an Illustrious LoRA', async () => {
+  it('does NOT render the model name in the header (subtitle is gone)', async () => {
     setMockContext({
       modelName: 'Luna_arianaV3',
       modelType: 'LORA',
-      checkpoint: { ...DEFAULT_CHECKPOINT, baseModel: 'Illustrious' },
+      checkpoint: { ...DEFAULT_CHECKPOINT, baseModel: 'Flux.1 D' },
     });
     await renderApp(<App />);
-    expect(screen.getByText('Illustrious LoRA')).toBeInTheDocument();
+    // The model name lived inside a <small> in the Tier-1 subtitle. The
+    // whole subtitle is deleted; the name should not appear anywhere in
+    // the block. (Other places that could legitimately surface it —
+    // e.g. download filename, alt text — don't render visible text.)
+    expect(screen.queryByText('Luna_arianaV3')).not.toBeInTheDocument();
   });
 
-  it('collapses Flux.1 S / Flux.1 Kontext to "Flux"', async () => {
+  it('does NOT render the ecosystem chip ("Flux LoRA", "SDXL Checkpoint", etc.)', async () => {
     setMockContext({
       modelName: 'Luna_arianaV3',
       modelType: 'LORA',
-      checkpoint: { ...DEFAULT_CHECKPOINT, baseModel: 'Flux.1 Kontext' },
+      checkpoint: { ...DEFAULT_CHECKPOINT, baseModel: 'Flux.1 D' },
     });
     await renderApp(<App />);
-    expect(screen.getByText('Flux LoRA')).toBeInTheDocument();
-  });
-
-  it('renders bare model name (no chip) when no checkpoint info is available', async () => {
-    setMockContext({
-      modelName: 'Luna_arianaV3',
-      modelType: 'LORA',
-      checkpoint: null,
-    });
-    await renderApp(<App />);
-    expect(screen.getByText('Luna_arianaV3')).toBeInTheDocument();
-    // No ecosystem chip rendered — there's nothing to derive from.
-    expect(screen.queryByText(/Flux LoRA|SDXL/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Flux LoRA/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/SDXL/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Illustrious/i)).not.toBeInTheDocument();
   });
 
   it('does NOT render the model version id anywhere on screen', async () => {
@@ -93,7 +87,6 @@ describe('Header — model line', () => {
       checkpoint: { ...DEFAULT_CHECKPOINT, baseModel: 'Flux.1 D' },
     });
     await renderApp(<App />);
-    // The old "v2835132" form was the legacy header — must be gone.
     expect(screen.queryByText(/v2835132/)).not.toBeInTheDocument();
     expect(screen.queryByText(/2835132/)).not.toBeInTheDocument();
   });

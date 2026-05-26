@@ -42,8 +42,10 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     // Visual weight: uses the same primary button class as Generate. The
     // class is the load-bearing assertion (it pulls in the hover/active
     // CSS); style.background also fixes the brand color.
+    // Tier-3 #5: CTA base color is now Mantine blue[6] (#228BE6) — the
+    // brighter shade that "pops" against the surface.
     expect(topUp).toHaveClass('gfm-primary');
-    expect(topUp.style.background.toLowerCase()).toMatch(/#1971c2|rgb\(25, 113, 194\)/);
+    expect(topUp.style.background.toLowerCase()).toMatch(/#228be6|rgb\(34, 139, 230\)/);
   });
 
   it('demotes the error message to supporting copy in the insufficient case', async () => {

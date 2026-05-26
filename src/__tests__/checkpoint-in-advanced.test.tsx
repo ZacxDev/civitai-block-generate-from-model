@@ -51,7 +51,9 @@ describe('Checkpoint picker inside Advanced (delta #3)', () => {
     setMockContext({ modelType: 'LORA', checkpoint: DEFAULT_CHECKPOINT });
     await renderApp(<App />);
     // The toggle is collapsed by default — aria-expanded reads "false".
-    expect(screen.getByRole('button', { name: /Advanced/i })).toHaveAttribute(
+    // Tier-3 #3: the Advanced toggle is now the three-dots icon button
+    // in the header, identified by aria-label="Advanced settings".
+    expect(screen.getByRole('button', { name: /Advanced settings/i })).toHaveAttribute(
       'aria-expanded',
       'false'
     );
@@ -65,7 +67,7 @@ describe('Checkpoint picker inside Advanced (delta #3)', () => {
   it('shows the "Generating with:" row when Advanced is opened (LoRA install)', async () => {
     setMockContext({ modelType: 'LORA', checkpoint: DEFAULT_CHECKPOINT });
     await renderApp(<App />);
-    const toggle = screen.getByRole('button', { name: /Advanced/i });
+    const toggle = screen.getByRole('button', { name: /Advanced settings/i });
     await userEvent.click(toggle);
     expect(toggle).toHaveAttribute('aria-expanded', 'true');
 
@@ -79,7 +81,7 @@ describe('Checkpoint picker inside Advanced (delta #3)', () => {
   it('does NOT render the "Generating with:" row for Checkpoint installs even when Advanced is open', async () => {
     setMockContext({ modelType: 'Checkpoint', checkpoint: DEFAULT_CHECKPOINT });
     await renderApp(<App />);
-    const toggle = screen.getByRole('button', { name: /Advanced/i });
+    const toggle = screen.getByRole('button', { name: /Advanced settings/i });
     await userEvent.click(toggle);
     // For Checkpoint-bound installs the picker block is suppressed
     // entirely (not just hidden) — no "Change" button rendered, no row.
@@ -90,7 +92,7 @@ describe('Checkpoint picker inside Advanced (delta #3)', () => {
   it('fires checkpointPicker.open when "Change" is clicked from inside Advanced', async () => {
     setMockContext({ modelType: 'LORA', checkpoint: DEFAULT_CHECKPOINT });
     await renderApp(<App />);
-    await userEvent.click(screen.getByRole('button', { name: /Advanced/i }));
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
     await userEvent.click(screen.getByRole('button', { name: /Change/ }));
     expect(getMockSpies().checkpointOpen).toHaveBeenCalledTimes(1);
     // Sanity-check the args shape — baseModelGroup should be the
