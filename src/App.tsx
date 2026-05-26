@@ -285,7 +285,7 @@ export function App() {
   if (!viewer) {
     return (
       <div ref={rootRef} style={containerStyle(theme)}>
-        <Header model={model} />
+        <Header model={model} checkpoint={model.checkpoint ?? null} theme={theme} />
         <p style={subtleStyle}>Sign in to generate.</p>
       </div>
     );
@@ -294,7 +294,7 @@ export function App() {
   if (viewer.status === 'banned' || viewer.status === 'muted') {
     return (
       <div ref={rootRef} style={containerStyle(theme)}>
-        <Header model={model} />
+        <Header model={model} checkpoint={model.checkpoint ?? null} theme={theme} />
         <p style={subtleStyle}>
           Account status is <strong>{viewer.status}</strong>. Generation is unavailable.
         </p>
@@ -390,41 +390,14 @@ export function App() {
   return (
     <div ref={rootRef} style={containerStyle(theme)}>
       <StyleSheet />
-      <Header model={model} />
+      <Header model={model} checkpoint={effectiveCheckpoint} theme={theme} />
 
-      {showCheckpointPicker && (
-        <div style={checkpointRowStyle(theme)}>
-          <span style={subtleStyle}>
-            Generating with:{' '}
-            {effectiveCheckpoint ? (
-              <strong style={{ color: 'inherit', opacity: 1 }}>
-                {effectiveCheckpoint.modelName}
-                {effectiveCheckpoint.versionName ? ` (${effectiveCheckpoint.versionName})` : ''}
-              </strong>
-            ) : (
-              <em>no checkpoint configured</em>
-            )}
-          </span>
-          <button
-            type="button"
-            onClick={handleChangeCheckpoint}
-            className="gfm-link"
-            style={linkButtonStyle()}
-            disabled={isBusy}
-          >
-            Change
-          </button>
-        </div>
-      )}
       {checkpointError && (
         <p style={errorTextStyle}>Checkpoint: {checkpointError}</p>
       )}
 
       {showcaseImages.length > 0 && (
         <div>
-          <p style={{ ...subtleStyle, marginBottom: 6 }}>
-            Remix from a preview image:
-          </p>
           <div style={carouselStyle}>
             {showcaseImages.map((img, idx) => (
               <button
@@ -447,7 +420,7 @@ export function App() {
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
         <input
           aria-label="Prompt (optional)"
-          placeholder={`Optional prompt — defaults to ${model.modelName}'s style`}
+          placeholder="Describe what you want (or hit Generate to use the preview)"
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           className="gfm-input"
@@ -467,15 +440,10 @@ export function App() {
           onUndoRandomize={() => setRandomizeSeedOnce(false)}
           isBusy={isBusy}
           theme={theme}
+          showCheckpointPicker={showCheckpointPicker}
+          effectiveCheckpoint={effectiveCheckpoint}
+          onChangeCheckpoint={handleChangeCheckpoint}
         />
-
-        {(estimatedCost != null || estimateError) && (
-          <p style={subtleStyle}>
-            {estimateError
-              ? `Couldn't estimate cost: ${estimateError}`
-              : `Estimated cost: ${estimatedCost} Buzz (budget: ${budget})`}
-          </p>
-        )}
 
         <button
           type="button"
@@ -487,6 +455,12 @@ export function App() {
           {isBusy && <Pulse />}
           <span>{labelForStatus(status, budget, estimatedCost)}</span>
         </button>
+
+        {estimateError && (
+          <p style={{ ...subtleStyle, fontSize: 12 }}>
+            Couldn't estimate cost: {estimateError}
+          </p>
+        )}
       </div>
 
       {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && (
@@ -507,20 +481,6 @@ export function App() {
         </div>
       )}
 
-      {/* Gate the intermediate-state label on hook status === 'polling',
-          not just snapshot status: the SDK leaves `result` populated with
-          the estimate's snapshot (status: 'pending') even before submit,
-          which would otherwise show "Queued…" with nothing actually
-          queued. 'polling' only sets after submit() returns. */}
-      {status === 'polling' &&
-        result &&
-        (result.status === 'pending' || result.status === 'processing') && (
-          <p style={{ ...subtleStyle, display: 'flex', alignItems: 'center', gap: 6 }}>
-            <Pulse />
-            <span>{result.status === 'pending' ? 'Queued…' : 'Generating…'}</span>
-          </p>
-        )}
-
       {result && result.status === 'succeeded' && <Result snapshot={result} theme={theme} />}
     </div>
   );
@@ -528,15 +488,108 @@ export function App() {
 
 // --------- helpers ---------
 
-function Header({ model }: { model: ModelSlotContext }) {
+function Header({
+  model,
+  checkpoint,
+  theme,
+}: {
+  model: ModelSlotContext;
+  checkpoint: BlockCheckpointInfo | null;
+  theme: string | null;
+}) {
+  const chipLabel = formatModelTypeChip(model.modelType, checkpoint?.baseModel ?? null);
   return (
     <header style={headerStyle}>
       <h3 style={headerTitleStyle}>Generate from this model</h3>
-      <small style={subtleStyle}>
-        {model.modelName} · v{model.modelVersionId}
-      </small>
+      <div style={headerSubRowStyle}>
+        <small style={{ ...subtleStyle, opacity: 0.85 }}>{model.modelName}</small>
+        {chipLabel && (
+          <>
+            <span style={headerDotStyle} aria-hidden>
+              ·
+            </span>
+            <span style={headerChipStyle(theme)}>{chipLabel}</span>
+          </>
+        )}
+      </div>
     </header>
   );
+}
+
+/**
+ * Map a `BlockCheckpointInfo.baseModel` string to the short ecosystem label
+ * we use in the header chip. Variant collapsing keeps the chip readable
+ * across the long tail (Flux.1 D / Flux.1 S / Flux.1 Kontext all → "Flux").
+ * Unknown bases fall through to the raw string — better than dropping the
+ * chip silently when a new ecosystem ships.
+ */
+function deriveEcosystem(baseModel: string | null): string | null {
+  if (!baseModel) return null;
+  const b = baseModel.trim();
+  if (!b) return null;
+  if (b.startsWith('Flux')) return 'Flux';
+  if (b.startsWith('SDXL')) return 'SDXL';
+  if (b === 'Illustrious') return 'Illustrious';
+  if (b === 'Pony') return 'Pony';
+  if (b === 'NoobAI') return 'NoobAI';
+  if (b === 'SD 1.5' || b === 'SD 1.4') return 'SD1.5';
+  if (b.startsWith('SD 2')) return 'SD2';
+  return b;
+}
+
+/**
+ * Combine `modelType` (e.g. 'LORA', 'Checkpoint') with the derived
+ * ecosystem into a human-readable chip — "Flux LoRA", "SDXL Checkpoint",
+ * "Illustrious LoRA", etc. Returns null when we have nothing useful to
+ * show (no checkpoint info AND no recognizable modelType).
+ */
+function formatModelTypeChip(modelType: string | null, baseModel: string | null): string | null {
+  const eco = deriveEcosystem(baseModel);
+  const type = formatModelType(modelType);
+  if (!eco && !type) return null;
+  if (eco && type) return `${eco} ${type}`;
+  return eco ?? type;
+}
+
+function formatModelType(modelType: string | null): string | null {
+  if (!modelType) return null;
+  // Map upper-snake enum-ish strings the host sends to title-case display.
+  switch (modelType) {
+    case 'LORA':
+      return 'LoRA';
+    case 'LoCon':
+    case 'LOCON':
+      return 'LoCon';
+    case 'TextualInversion':
+    case 'TEXTUAL_INVERSION':
+      return 'Embedding';
+    case 'Hypernetwork':
+    case 'HYPERNETWORK':
+      return 'Hypernetwork';
+    case 'AestheticGradient':
+      return 'Aesthetic Gradient';
+    case 'Controlnet':
+    case 'CONTROLNET':
+      return 'ControlNet';
+    case 'Checkpoint':
+    case 'CHECKPOINT':
+      return 'Checkpoint';
+    case 'VAE':
+      return 'VAE';
+    case 'Upscaler':
+    case 'UPSCALER':
+      return 'Upscaler';
+    case 'Poses':
+      return 'Poses';
+    case 'Wildcards':
+      return 'Wildcards';
+    case 'Workflows':
+      return 'Workflows';
+    case 'Other':
+      return 'Other';
+    default:
+      return modelType;
+  }
 }
 
 /**
@@ -563,6 +616,12 @@ function AdvancedSection(props: {
   onUndoRandomize: () => void;
   isBusy: boolean;
   theme: string | null;
+  // Checkpoint picker — relocated here from the header so 90% users
+  // don't see it by default. Only rendered when the install isn't
+  // Checkpoint-bound (LoRA installs can swap the underlying Checkpoint).
+  showCheckpointPicker: boolean;
+  effectiveCheckpoint: BlockCheckpointInfo | null;
+  onChangeCheckpoint: () => void;
 }) {
   const {
     open,
@@ -576,6 +635,9 @@ function AdvancedSection(props: {
     onUndoRandomize,
     isBusy,
     theme,
+    showCheckpointPicker,
+    effectiveCheckpoint,
+    onChangeCheckpoint,
   } = props;
 
   // Effective values for display: override wins, then showcase.
@@ -609,6 +671,32 @@ function AdvancedSection(props: {
         style={advancedCollapseStyle(open)}
       >
         <div style={advancedBodyStyle(theme)}>
+          {showCheckpointPicker && (
+            <div style={{ ...checkpointRowStyle(theme), marginBottom: 10 }}>
+              <span style={subtleStyle}>
+                Generating with:{' '}
+                {effectiveCheckpoint ? (
+                  <strong style={{ color: 'inherit', opacity: 1 }}>
+                    {effectiveCheckpoint.modelName}
+                    {effectiveCheckpoint.versionName
+                      ? ` (${effectiveCheckpoint.versionName})`
+                      : ''}
+                  </strong>
+                ) : (
+                  <em>no checkpoint configured</em>
+                )}
+              </span>
+              <button
+                type="button"
+                onClick={onChangeCheckpoint}
+                className="gfm-link"
+                style={linkButtonStyle()}
+                disabled={isBusy}
+              >
+                Change
+              </button>
+            </div>
+          )}
           {editable ? (
             <EditableControls
               eff={eff}
@@ -917,9 +1005,10 @@ function labelForStatus(
     default:
       // idle, confirming, done, error: the button is actionable. Show
       // the actual estimated cost when we have one, fall back to the
-      // budget cap otherwise.
+      // budget cap otherwise. Middle-dot separator reads cleaner than
+      // parens for the known-cost case.
       return estimatedCost != null
-        ? `Generate (${estimatedCost} Buzz)`
+        ? `Generate · ${estimatedCost} Buzz`
         : `Generate (≤ ${budget} Buzz)`;
   }
 }
@@ -1181,6 +1270,36 @@ const headerTitleStyle: CSSProperties = {
   letterSpacing: '-0.01em',
   lineHeight: 1.25,
 };
+
+const headerSubRowStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 6,
+  flexWrap: 'wrap',
+  minWidth: 0,
+};
+
+const headerDotStyle: CSSProperties = {
+  opacity: 0.45,
+  fontSize: 13,
+  lineHeight: 1,
+};
+
+// Subtle pill matching the checkpoint-row aesthetic. Uses the existing
+// surface/border tokens so it tracks light/dark without a new palette.
+const headerChipStyle = (theme: string | null): CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  padding: '2px 8px',
+  borderRadius: 999,
+  background: theme === 'dark' ? '#25262B' : '#f1f3f5',
+  border: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
+  fontSize: 12,
+  fontWeight: 500,
+  lineHeight: 1.5,
+  color: 'inherit',
+  whiteSpace: 'nowrap',
+});
 
 const checkpointRowStyle = (theme: string | null): CSSProperties => ({
   display: 'flex',
