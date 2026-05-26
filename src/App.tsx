@@ -265,25 +265,11 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedShowcaseIdx]);
 
-  // Tier-4 Delta B: clear pastResults on showcase SWAP (not on the
-  // initial default-selection). Tracked via a ref so the very first time
-  // selectedShowcaseIdx goes from null→0 doesn't nuke a pre-injected
-  // succeeded snapshot (the result-actions tests inject a result via the
-  // mock workflow state — that effect runs in parallel with the
-  // default-selection effect, and the order isn't guaranteed).
-  const prevShowcaseIdxRef = useRef<number | null>(null);
-  useEffect(() => {
-    const prev = prevShowcaseIdxRef.current;
-    prevShowcaseIdxRef.current = selectedShowcaseIdx;
-    // Only reset when actually transitioning between two non-null
-    // showcase selections (a user-initiated swap). The initial
-    // null→idx transition is the default-selection effect populating
-    // the picker for the first time — not a swap.
-    if (prev == null || selectedShowcaseIdx == null) return;
-    if (prev === selectedShowcaseIdx) return;
-    setPastResults([]);
-    capturedWorkflowIdsRef.current = new Set();
-  }, [selectedShowcaseIdx]);
+  // Tier-4 Delta B (revised 2026-05-26): pastResults persist across
+  // showcase swaps. The gallery is the user's session-long exploration
+  // record — picking a different starter image just changes WHAT the
+  // next generation looks like; it shouldn't erase what they've already
+  // made. Only path that clears pastResults today is component unmount.
 
   // Auto-estimate on mount + whenever the model identity changes
   // (checkpoint swap, or showcase pick — both change cost via the
@@ -458,30 +444,7 @@ export function App() {
   const isRegenerate =
     selectedShowcaseIdx != null && lastSubmittedShowcaseIdx === selectedShowcaseIdx;
 
-  // Tier-3 #11a: Try-again ALWAYS randomizes the seed. The user just
-  // saw the showcase's seed render; clicking "Try again" is the obvious
-  // "give me a different one" affordance. Skip the React-state hop and
-  // pass the flag directly to the submit path.
-  const handleTryAgain = async () => {
-    try {
-      const params = buildSubmitParams(prompt, suffix, selectedShowcase, overrides, true);
-      // Sync state with what we just did so subsequent Generate clicks
-      // continue to randomize (consistent with the re-generate counter).
-      if (selectedShowcaseIdx != null) {
-        setLastSubmittedShowcaseIdx(selectedShowcaseIdx);
-      }
-      await submit({
-        kind: 'textToImage',
-        modelId: model.modelId,
-        modelVersionId: model.modelVersionId,
-        params,
-      });
-    } catch {
-      // Same as handleGenerate — surface via `error` in render.
-    }
-  };
-
-  const handleGenerate = async () => {
+const handleGenerate = async () => {
     try {
       // Either the user pressed 🎲 (manual), or this is a re-gen on the
       // same showcase (auto). Both paths drop the seed for this submit.
@@ -665,7 +628,6 @@ export function App() {
             theme={theme}
             modelName={model.modelName}
             isBusy={isBusy}
-            onTryAgain={handleTryAgain}
           />
         )}
       </div>
@@ -1177,13 +1139,11 @@ function ResultsCarousel({
   theme,
   modelName,
   isBusy,
-  onTryAgain,
 }: {
   results: BlockWorkflowSnapshot[];
   theme: string | null;
   modelName: string;
   isBusy: boolean;
-  onTryAgain: () => void | Promise<void>;
 }) {
   return (
     <div className="gfm-fade-in" style={{ marginTop: 8 }}>
@@ -1239,24 +1199,6 @@ function ResultsCarousel({
               </div>
             );
           })}
-          {/* Try Again is a trailing pseudo-card — keeps the action
-              visually paired with the newest result without growing
-              another button into the result-card footers. */}
-          <button
-            type="button"
-            onClick={onTryAgain}
-            disabled={isBusy}
-            className="gfm-link"
-            style={{
-              ...linkButtonStyle(),
-              color: theme === 'dark' ? BRAND_LIGHT_DARK : BRAND,
-              alignSelf: 'center',
-              padding: '0 8px',
-              whiteSpace: 'nowrap',
-            }}
-          >
-            Try again
-          </button>
         </div>
       </div>
     </div>

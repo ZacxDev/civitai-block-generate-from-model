@@ -22,7 +22,6 @@ import userEvent from '@testing-library/user-event';
 
 import {
   blocksReactMockFactory,
-  getMockSpies,
   renderApp,
   resetBlocksReactMock,
   setMockContext,
@@ -52,38 +51,11 @@ describe('Inline result actions (delta #7)', () => {
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
   });
 
-  it('renders Try again button when the workflow has succeeded', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
-    await renderApp(<App />);
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
-  });
+  // "Try again" was removed (2026-05-26). The auto-randomize-on-re-generate
+  // behavior lives on the main Generate button — clicking it a 2nd time
+  // on the same showcase drops the seed. See regenerate-semantics.test.tsx.
 
-  it('clicking Try again calls submit() with the seed dropped (Tier-3 #11a — auto-randomize)', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
-    await renderApp(<App />);
-    const spies = getMockSpies();
-    spies.submit.mockClear();
-
-    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
-
-    expect(spies.submit).toHaveBeenCalledTimes(1);
-    // Sanity: it passed the kind + model identity.
-    expect(spies.submit).toHaveBeenCalledWith(
-      expect.objectContaining({
-        kind: 'textToImage',
-        modelId: expect.any(Number),
-        modelVersionId: expect.any(Number),
-      })
-    );
-    // Tier-3 #11a: the seed must be absent from the params (randomize
-    // drops the showcase seed so the orchestrator picks fresh). The
-    // first showcase fixture has seed=12345; if that leaked through,
-    // Try again would just re-render the same image.
-    const callArgs = spies.submit.mock.calls[0]![0] as { params: { seed?: number } };
-    expect(callArgs.params.seed).toBeUndefined();
-  });
-
-  it('clicking Download fetches the image as a Blob and clicks an anchor with the derived filename', async () => {
+it('clicking Download fetches the image as a Blob and clicks an anchor with the derived filename', async () => {
     setMockContext({ modelName: 'Luna_arianaV3' });
     setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
@@ -177,23 +149,21 @@ describe('Inline result actions (delta #7)', () => {
     openSpy.mockRestore();
   });
 
-  it('does NOT render Download / Try again while status is polling', async () => {
+  it('does NOT render the carousel while status is polling (no prior success captured)', async () => {
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf_1', status: 'pending' } as never,
     });
     await renderApp(<App />);
     expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
   });
 
-  it('disables Download + Try again while a re-submission is in flight', async () => {
-    // Status='submitting' represents a mid-Try-again call. Result is
+  it('disables Download while a re-submission is in flight (a prior result is in the carousel)', async () => {
+    // Status='submitting' represents a re-generate mid-call. Result is
     // still the prior success snapshot.
     setMockWorkflow({ status: 'submitting', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
     expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Try again' })).toBeDisabled();
   });
 });
 
@@ -245,17 +215,21 @@ describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => 
     expect(imgs[1]!.src).toBe('https://example.test/result.jpg');
   });
 
-  it('switching to a different showcase clears the results carousel', async () => {
+  it('switching to a different showcase PRESERVES the results carousel (gallery is session-long)', async () => {
+    // Tier-4 Delta B was originally "reset on showcase swap"; user
+    // feedback (2026-05-26) reversed that — picking a different starter
+    // should just change what the NEXT generation looks like, not erase
+    // what's already been made. The carousel is the user's session-long
+    // exploration record.
     setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
 
-    // Switch showcase — a "new exploration session" resets pastResults.
+    // Switch showcase — the prior result must remain visible.
     await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
 
-    // Carousel is gone (no card → no Download buttons).
-    expect(screen.queryByTestId('gfm-results-carousel')).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument();
+    expect(screen.getByTestId('gfm-results-carousel')).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
   });
 
   it('caps the carousel at MAX_RESULTS=8 with FIFO eviction (oldest goes first)', async () => {
@@ -296,7 +270,7 @@ describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => 
     expect(urls).toHaveLength(8);
   });
 
-  it('Try Again still works after multiple results accumulate — calls submit() with the seed dropped', async () => {
+  it('accumulated cards stay visible while a new submission is in flight', async () => {
     setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     const { rerender } = await renderApp(<App />);
 
@@ -313,16 +287,13 @@ describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => 
       await Promise.resolve();
     });
 
-    const spies = getMockSpies();
-    spies.submit.mockClear();
-    await userEvent.click(screen.getByRole('button', { name: 'Try again' }));
+    // Start a third submission (mid-flight) — the 2 prior cards stay.
+    setMockWorkflow({ status: 'submitting', result: SECOND_RESULT as never });
+    await act(async () => {
+      rerender(<App />);
+      await Promise.resolve();
+    });
 
-    expect(spies.submit).toHaveBeenCalledTimes(1);
-    const callArgs = spies.submit.mock.calls[0]![0] as { params: { seed?: number } };
-    expect(callArgs.params.seed).toBeUndefined();
-
-    // Carousel still has the 2 prior cards while submit is in flight —
-    // the prior snapshots aren't destroyed by the new submission.
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(2);
   });
 });
