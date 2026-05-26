@@ -435,6 +435,11 @@ export function App() {
   // the button forever. SDK transitions confirming → submitting on click.
   const busy: WorkflowStatus[] = ['estimating', 'submitting', 'polling'];
   const isBusy = busy.includes(status);
+  // A submission is "in flight" once it leaves estimating and either the
+  // submit() call or the polling timer is active. Drives the loading-card
+  // placeholder at the front of the results carousel. Estimating is busy
+  // but not in-flight (no workflow exists yet) so we don't show a card.
+  const isInFlight = status === 'submitting' || status === 'polling';
 
   // Tier-3 #11: Re-generate semantics. If the user already submitted for
   // THIS showcase (without switching since), the next Generate is treated
@@ -618,13 +623,25 @@ const handleGenerate = async () => {
           )
         )}
 
-        {/* Tier-4 Delta B: results carousel — every succeeded generation
-            stays visible until the user switches showcases. The hook's
-            latest `result` is the head of pastResults; Try Again still
-            re-submits against it (single button at the block level). */}
-        {pastResults.length > 0 && (
+        {/* Results carousel — every succeeded generation stays visible
+            for the session (persists across showcase swaps; see commit
+            89b8373). While a generation is in flight, a shimmer-animated
+            LoadingCard sits at the front of the row anchored to where
+            the next result will land. */}
+        {(isInFlight || pastResults.length > 0) && (
           <ResultsCarousel
             results={pastResults}
+            inFlight={
+              isInFlight
+                ? {
+                    cost: estimatedCost,
+                    aspectRatio:
+                      selectedShowcase && selectedShowcase.width && selectedShowcase.height
+                        ? `${selectedShowcase.width} / ${selectedShowcase.height}`
+                        : '1 / 1',
+                  }
+                : null
+            }
             theme={theme}
             modelName={model.modelName}
             isBusy={isBusy}
@@ -1136,11 +1153,13 @@ function truncate(s: string, n: number): string {
  */
 function ResultsCarousel({
   results,
+  inFlight,
   theme,
   modelName,
   isBusy,
 }: {
   results: BlockWorkflowSnapshot[];
+  inFlight: { cost: number | null; aspectRatio: string } | null;
   theme: string | null;
   modelName: string;
   isBusy: boolean;
@@ -1153,6 +1172,13 @@ function ResultsCarousel({
           style={resultsCarouselStyle}
           data-testid="gfm-results-carousel"
         >
+          {inFlight && (
+            <LoadingCard
+              theme={theme}
+              cost={inFlight.cost}
+              aspectRatio={inFlight.aspectRatio}
+            />
+          )}
           {results.map((snap, i) => {
             const firstUrl = snap.imageUrls?.[0] ?? null;
             // Key on workflowId when we have it (stable across re-renders);
@@ -1200,6 +1226,70 @@ function ResultsCarousel({
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Placeholder card shown at the front of the results carousel while a
+ * generation is in flight. Visually a shimmer-animated rectangle sized
+ * to the selected showcase's aspect ratio so the user sees roughly the
+ * shape of the image they're about to get, plus a small "Generating ·
+ * {cost} ⚡" footer that mirrors the Generate button's label.
+ *
+ * `aria-busy` + `aria-label="Generating"` give screen readers a hook;
+ * `prefers-reduced-motion` already disables the shimmer via the
+ * global media-query block.
+ */
+function LoadingCard({
+  theme,
+  cost,
+  aspectRatio,
+}: {
+  theme: string | null;
+  cost: number | null;
+  aspectRatio: string;
+}) {
+  return (
+    <div style={resultCardStyle(theme)} aria-busy aria-label="Generating">
+      <div
+        style={{
+          aspectRatio,
+          maxHeight: 320,
+          width: '100%',
+          borderRadius: 8,
+          background:
+            theme === 'dark'
+              ? 'linear-gradient(90deg, #1A1B1E 0%, #25262B 50%, #1A1B1E 100%)'
+              : 'linear-gradient(90deg, #e9ecef 0%, #f1f3f5 50%, #e9ecef 100%)',
+          backgroundSize: '200% 100%',
+          animation: 'gfm-shimmer 1.4s ease-in-out infinite',
+        }}
+      />
+      <div style={resultCardFooterStyle}>
+        <p
+          style={{
+            ...subtleStyle,
+            marginRight: 'auto',
+            fontSize: 12,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 6,
+          }}
+        >
+          <Pulse />
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+            Generating
+            {cost != null && (
+              <>
+                {' · '}
+                <strong style={{ opacity: 1, color: 'inherit' }}>{cost}</strong>
+                <BoltIcon />
+              </>
+            )}
+          </span>
+        </p>
       </div>
     </div>
   );
