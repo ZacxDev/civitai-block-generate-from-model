@@ -43,7 +43,7 @@
   "iframe": {
     "src": "https://blocks-pr2319.civitaic.com/generate-from-model/",
     "minHeight": 240,
-    "maxHeight": 800,
+    "maxHeight": 1600,
     "resizable": true,
     "sandbox": "allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox"
   },

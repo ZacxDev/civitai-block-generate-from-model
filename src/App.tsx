@@ -56,6 +56,13 @@ export function App() {
   const { submit, estimate, poll, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
   const checkpointPicker = useCheckpointPicker();
+  // Tier-4 Delta A: rootRef is the outer (unpadded) measurement element
+  // for useBlockResize. The SDK hook reads `ResizeObserverEntry.contentRect.height`
+  // which is the CONTENT-box of the observed element — so any padding on
+  // rootRef gets silently shaved off the reported height (~32px short →
+  // iframe clips the bottom). Fix: keep rootRef padding-free; put the
+  // visible padding on `innerRef`'s container. The outer's content-box
+  // now equals the inner's full layout box.
   const rootRef = useRef<HTMLDivElement>(null);
   useBlockResize(rootRef);
 
@@ -98,6 +105,18 @@ export function App() {
   const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const estimateInFlightRef = useRef(0);
+
+  // Tier-4 Delta B: accumulate every succeeded generation into a small
+  // FIFO history so re-generate stops being destructive — the user sees
+  // a horizontal carousel of past outputs and can compare them. Capped
+  // at MAX_RESULTS to keep the in-memory footprint bounded. The hook's
+  // `result` is still the most-recent (Try Again submits against it);
+  // we just stop visually replacing previous results.
+  //
+  // Capture uses a Set<workflowId> so React's StrictMode double-effect
+  // and re-renders don't push the same snapshot twice.
+  const [pastResults, setPastResults] = useState<BlockWorkflowSnapshot[]>([]);
+  const capturedWorkflowIdsRef = useRef<Set<string>>(new Set());
 
   // useBuzzWorkflow().submit() returns the initial snapshot but the hook
   // doesn't auto-poll — it's the caller's job to drive poll(workflowId)
@@ -246,6 +265,26 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedShowcaseIdx]);
 
+  // Tier-4 Delta B: clear pastResults on showcase SWAP (not on the
+  // initial default-selection). Tracked via a ref so the very first time
+  // selectedShowcaseIdx goes from null→0 doesn't nuke a pre-injected
+  // succeeded snapshot (the result-actions tests inject a result via the
+  // mock workflow state — that effect runs in parallel with the
+  // default-selection effect, and the order isn't guaranteed).
+  const prevShowcaseIdxRef = useRef<number | null>(null);
+  useEffect(() => {
+    const prev = prevShowcaseIdxRef.current;
+    prevShowcaseIdxRef.current = selectedShowcaseIdx;
+    // Only reset when actually transitioning between two non-null
+    // showcase selections (a user-initiated swap). The initial
+    // null→idx transition is the default-selection effect populating
+    // the picker for the first time — not a swap.
+    if (prev == null || selectedShowcaseIdx == null) return;
+    if (prev === selectedShowcaseIdx) return;
+    setPastResults([]);
+    capturedWorkflowIdsRef.current = new Set();
+  }, [selectedShowcaseIdx]);
+
   // Auto-estimate on mount + whenever the model identity changes
   // (checkpoint swap, or showcase pick — both change cost via the
   // resolved params). NOT debounced on prompt edits: prompt length
@@ -292,11 +331,26 @@ export function App() {
     selectedShowcaseIdx,
   ]);
 
+  // Tier-4 Delta B: append every fresh succeeded snapshot to pastResults.
+  // Guard with a workflowId Set so re-renders + StrictMode double-effects
+  // don't duplicate. Newest goes to the front; FIFO eviction keeps the
+  // array bounded at MAX_RESULTS. Failed/canceled/expired snapshots are
+  // intentionally NOT captured — the error UI handles them, and we don't
+  // want a string of failed thumbnails cluttering the carousel.
+  useEffect(() => {
+    if (!result || result.status !== 'succeeded' || !result.workflowId) return;
+    if (capturedWorkflowIdsRef.current.has(result.workflowId)) return;
+    capturedWorkflowIdsRef.current.add(result.workflowId);
+    setPastResults((prev) => [result, ...prev].slice(0, MAX_RESULTS));
+  }, [result]);
+
   if (!ready) {
     return (
-      <div ref={rootRef} style={containerStyle(theme)}>
-        <StyleSheet />
-        <LoadingSkeleton theme={theme} />
+      <div ref={rootRef} style={outerContainerStyle(theme)}>
+        <div style={innerContainerStyle()}>
+          <StyleSheet />
+          <LoadingSkeleton theme={theme} />
+        </div>
       </div>
     );
   }
@@ -304,40 +358,46 @@ export function App() {
   const model = asModelContext(context);
   if (!model) {
     return (
-      <div ref={rootRef} style={containerStyle(theme)}>
-        <p style={errorTextStyle}>
-          This block expects a model-page slot. Current slot: <code>{context.slotId}</code>
-        </p>
+      <div ref={rootRef} style={outerContainerStyle(theme)}>
+        <div style={innerContainerStyle()}>
+          <p style={errorTextStyle}>
+            This block expects a model-page slot. Current slot: <code>{context.slotId}</code>
+          </p>
+        </div>
       </div>
     );
   }
 
   if (!viewer) {
     return (
-      <div ref={rootRef} style={containerStyle(theme)}>
-        <Header
-          theme={theme}
-          advancedOpen={advancedOpen}
-          onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
-          isBusy={true}
-        />
-        <p style={subtleStyle}>Sign in to generate.</p>
+      <div ref={rootRef} style={outerContainerStyle(theme)}>
+        <div style={innerContainerStyle()}>
+          <Header
+            theme={theme}
+            advancedOpen={advancedOpen}
+            onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
+            isBusy={true}
+          />
+          <p style={subtleStyle}>Sign in to generate.</p>
+        </div>
       </div>
     );
   }
 
   if (viewer.status === 'banned' || viewer.status === 'muted') {
     return (
-      <div ref={rootRef} style={containerStyle(theme)}>
-        <Header
-          theme={theme}
-          advancedOpen={advancedOpen}
-          onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
-          isBusy={true}
-        />
-        <p style={subtleStyle}>
-          Account status is <strong>{viewer.status}</strong>. Generation is unavailable.
-        </p>
+      <div ref={rootRef} style={outerContainerStyle(theme)}>
+        <div style={innerContainerStyle()}>
+          <Header
+            theme={theme}
+            advancedOpen={advancedOpen}
+            onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
+            isBusy={true}
+          />
+          <p style={subtleStyle}>
+            Account status is <strong>{viewer.status}</strong>. Generation is unavailable.
+          </p>
+        </div>
       </div>
     );
   }
@@ -469,126 +529,136 @@ export function App() {
     errMessage.includes('balance');
 
   return (
-    <div ref={rootRef} style={containerStyle(theme)}>
-      <StyleSheet />
-      <Header
-        theme={theme}
-        advancedOpen={advancedOpen}
-        onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
-        isBusy={isBusy}
-      />
-
-      {checkpointError && (
-        <p style={errorTextStyle}>Checkpoint: {checkpointError}</p>
-      )}
-
-      {showcaseImages.length > 0 && (
-        <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
-          <div
-            ref={carouselRef}
-            className="gfm-carousel"
-            style={carouselStyle}
-            data-testid="gfm-carousel"
-          >
-            {showcaseImages.map((img, idx) => (
-              <button
-                key={img.id}
-                ref={(el) => {
-                  thumbRefs.current[idx] = el;
-                }}
-                type="button"
-                aria-label={`Pick preview ${idx + 1}`}
-                aria-pressed={idx === selectedShowcaseIdx}
-                onClick={() => setSelectedShowcaseIdx(idx)}
-                disabled={isBusy}
-                className="gfm-thumb"
-                style={thumbButtonStyle(idx === selectedShowcaseIdx, theme, img)}
-              >
-                <img src={img.url} alt="" style={thumbImageStyle} loading="lazy" />
-              </button>
-            ))}
-          </div>
-        </div>
-      )}
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <PromptTextarea
-          value={prompt}
-          onChange={setPrompt}
-          onSubmit={handleGenerate}
-          disabled={isBusy}
+    <div ref={rootRef} style={outerContainerStyle(theme)}>
+      <div style={innerContainerStyle()}>
+        <StyleSheet />
+        <Header
           theme={theme}
-        />
-
-        <AdvancedSection
-          open={advancedOpen}
-          editable={showAdvanced}
-          showcase={selectedShowcase}
-          overrides={overrides}
-          onOverrideChange={(patch) => setOverrides((prev) => ({ ...prev, ...patch }))}
-          randomizeSeedOnce={randomizeSeedOnce}
-          onRandomizeSeed={() => setRandomizeSeedOnce(true)}
-          onUndoRandomize={() => setRandomizeSeedOnce(false)}
+          advancedOpen={advancedOpen}
+          onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
           isBusy={isBusy}
-          theme={theme}
-          showCheckpointPicker={showCheckpointPicker}
-          effectiveCheckpoint={effectiveCheckpoint}
-          onChangeCheckpoint={handleChangeCheckpoint}
         />
 
-        <button
-          type="button"
-          onClick={handleGenerate}
-          disabled={isBusy}
-          className="gfm-primary"
-          style={primaryButtonStyle(isBusy)}
-        >
-          {isBusy && <Pulse />}
-          <span>{labelForStatus(status, budget, estimatedCost, isRegenerate)}</span>
-        </button>
+        {checkpointError && (
+          <p style={errorTextStyle}>Checkpoint: {checkpointError}</p>
+        )}
 
-        {estimateError && (
-          <p style={{ ...subtleStyle, fontSize: 12 }}>
-            Couldn't estimate cost: {estimateError}
-          </p>
+        {showcaseImages.length > 0 && (
+          <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
+            <div
+              ref={carouselRef}
+              className="gfm-carousel"
+              style={carouselStyle}
+              data-testid="gfm-carousel"
+            >
+              {showcaseImages.map((img, idx) => (
+                <button
+                  key={img.id}
+                  ref={(el) => {
+                    thumbRefs.current[idx] = el;
+                  }}
+                  type="button"
+                  aria-label={`Pick preview ${idx + 1}`}
+                  aria-pressed={idx === selectedShowcaseIdx}
+                  onClick={() => setSelectedShowcaseIdx(idx)}
+                  disabled={isBusy}
+                  className="gfm-thumb"
+                  style={thumbButtonStyle(idx === selectedShowcaseIdx, theme, img)}
+                >
+                  <img src={img.url} alt="" style={thumbImageStyle} loading="lazy" />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <PromptTextarea
+            value={prompt}
+            onChange={setPrompt}
+            onSubmit={handleGenerate}
+            disabled={isBusy}
+            theme={theme}
+          />
+
+          <AdvancedSection
+            open={advancedOpen}
+            editable={showAdvanced}
+            showcase={selectedShowcase}
+            overrides={overrides}
+            onOverrideChange={(patch) => setOverrides((prev) => ({ ...prev, ...patch }))}
+            randomizeSeedOnce={randomizeSeedOnce}
+            onRandomizeSeed={() => setRandomizeSeedOnce(true)}
+            onUndoRandomize={() => setRandomizeSeedOnce(false)}
+            isBusy={isBusy}
+            theme={theme}
+            showCheckpointPicker={showCheckpointPicker}
+            effectiveCheckpoint={effectiveCheckpoint}
+            onChangeCheckpoint={handleChangeCheckpoint}
+          />
+
+          <button
+            type="button"
+            onClick={handleGenerate}
+            disabled={isBusy}
+            className="gfm-primary"
+            style={primaryButtonStyle(isBusy)}
+          >
+            {isBusy && <Pulse />}
+            <BoltIcon />
+            <span>{labelForStatus(status, budget, estimatedCost, isRegenerate)}</span>
+          </button>
+
+          {estimateError && (
+            <p style={{ ...subtleStyle, fontSize: 12 }}>
+              Couldn't estimate cost: {estimateError}
+            </p>
+          )}
+        </div>
+
+        {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && (
+          isInsufficient ? (
+            // Tier-2 #10: for the insufficient-buzz path the Top-Up CTA is
+            // the obvious next action — make it the primary button, demote
+            // the error message to supporting copy. Visual weight matches
+            // the Generate button so the user reads "do this instead."
+            // Tier-4 Delta C: amber/gold to match the Buzz-spend semantics
+            // of the Generate button (top-up is also a Buzz transaction).
+            <div style={insufficientBoxStyle(theme)} role="alert">
+              <p style={insufficientCopyStyle(theme)}>Not enough Buzz for this generation.</p>
+              <button
+                type="button"
+                onClick={() => openPurchaseModal(budget * 10)}
+                className="gfm-primary"
+                style={primaryButtonStyle(false)}
+              >
+                <BoltIcon />
+                <span>Top up Buzz · {budget * 10}</span>
+              </button>
+            </div>
+          ) : (
+            <div style={errorBoxStyle(theme)} role="alert">
+              <p style={{ margin: 0 }}>
+                {error?.message ?? result?.error ?? 'Generation failed.'}
+              </p>
+            </div>
+          )
+        )}
+
+        {/* Tier-4 Delta B: results carousel — every succeeded generation
+            stays visible until the user switches showcases. The hook's
+            latest `result` is the head of pastResults; Try Again still
+            re-submits against it (single button at the block level). */}
+        {pastResults.length > 0 && (
+          <ResultsCarousel
+            results={pastResults}
+            theme={theme}
+            modelName={model.modelName}
+            isBusy={isBusy}
+            onTryAgain={handleTryAgain}
+          />
         )}
       </div>
-
-      {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && (
-        isInsufficient ? (
-          // Tier-2 #10: for the insufficient-buzz path the Top-Up CTA is
-          // the obvious next action — make it the primary button, demote
-          // the error message to supporting copy. Visual weight matches
-          // the Generate button so the user reads "do this instead."
-          <div style={insufficientBoxStyle(theme)} role="alert">
-            <p style={insufficientCopyStyle(theme)}>Not enough Buzz for this generation.</p>
-            <button
-              type="button"
-              onClick={() => openPurchaseModal(budget * 10)}
-              className="gfm-primary"
-              style={primaryButtonStyle(false)}
-            >
-              <span>Top up Buzz · {budget * 10}</span>
-            </button>
-          </div>
-        ) : (
-          <div style={errorBoxStyle(theme)} role="alert">
-            <p style={{ margin: 0 }}>
-              {error?.message ?? result?.error ?? 'Generation failed.'}
-            </p>
-          </div>
-        )
-      )}
-
-      {result && result.status === 'succeeded' && (
-        <Result
-          snapshot={result}
-          theme={theme}
-          modelName={model.modelName}
-          isBusy={isBusy}
-          onTryAgain={handleTryAgain}
-        />
-      )}
     </div>
   );
 }
@@ -1077,77 +1147,106 @@ function truncate(s: string, n: number): string {
   return s.length > n ? `${s.slice(0, n - 1)}…` : s;
 }
 
-function Result({
-  snapshot,
+/**
+ * Tier-4 Delta B: horizontally-scrollable carousel of past generations
+ * (newest first). Each card is a 240px-wide tile with the result image
+ * (max-height 320px), a "Spent N Buzz" line, and a Download button.
+ *
+ * Try Again lives at the block level (single button below the carousel)
+ * since the hook's `result` already tracks the newest snapshot — putting
+ * Try Again on every card would duplicate the action without clarifying
+ * what re-rolls against what. The Try Again button is rendered as a
+ * trailing card so it stays adjacent to the newest result.
+ *
+ * isBusy gates every interactive element on every card (Download +
+ * Try Again) so mid-flight clicks can't fire stale submits.
+ */
+function ResultsCarousel({
+  results,
   theme,
   modelName,
   isBusy,
   onTryAgain,
 }: {
-  snapshot: BlockWorkflowSnapshot;
+  results: BlockWorkflowSnapshot[];
   theme: string | null;
   modelName: string;
   isBusy: boolean;
   onTryAgain: () => void | Promise<void>;
 }) {
-  // Tier-3 #8: cap the result image to a sane viewport height. Without
-  // this a 2048×2048 generated image renders at 2048px tall and blows
-  // the iframe past the manifest's 1600px ceiling. `object-fit: contain`
-  // preserves aspect ratio inside the cap.
-  // Block is single-image v1 — render the first URL only. Multi-image
-  // results would otherwise stack vertically without limit; we'll
-  // revisit when the block exposes a quantity slider.
-  const firstUrl = snapshot.imageUrls?.[0] ?? null;
   return (
     <div className="gfm-fade-in" style={{ marginTop: 8 }}>
-      {firstUrl && (
-        <img
-          key={firstUrl}
-          src={firstUrl}
-          alt="Generation 1"
-          style={imageStyle(theme)}
-          loading="lazy"
-        />
-      )}
-      <div style={resultActionsRowStyle}>
-        {snapshot.cost?.total != null ? (
-          <p style={{ ...subtleStyle, marginRight: 'auto' }}>
-            Spent{' '}
-            <strong style={{ opacity: 1, color: 'inherit' }}>
-              {snapshot.cost.total} Buzz
-            </strong>
-          </p>
-        ) : (
-          <span style={{ marginRight: 'auto' }} />
-        )}
-        {firstUrl && (
+      <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
+        <div
+          className="gfm-carousel gfm-results-carousel"
+          style={resultsCarouselStyle}
+          data-testid="gfm-results-carousel"
+        >
+          {results.map((snap, i) => {
+            const firstUrl = snap.imageUrls?.[0] ?? null;
+            // Key on workflowId when we have it (stable across re-renders);
+            // fall back to index for the brief window before submit-returns
+            // hydrates the workflowId.
+            const key = snap.workflowId ?? `idx-${i}`;
+            return (
+              <div key={key} style={resultCardStyle(theme)}>
+                {firstUrl && (
+                  <img
+                    src={firstUrl}
+                    alt={`Generation ${results.length - i}`}
+                    style={resultCardImageStyle(theme)}
+                    loading="lazy"
+                  />
+                )}
+                <div style={resultCardFooterStyle}>
+                  {snap.cost?.total != null ? (
+                    <p style={{ ...subtleStyle, marginRight: 'auto', fontSize: 12 }}>
+                      Spent{' '}
+                      <strong style={{ opacity: 1, color: 'inherit' }}>
+                        {snap.cost.total} Buzz
+                      </strong>
+                    </p>
+                  ) : (
+                    <span style={{ marginRight: 'auto' }} />
+                  )}
+                  {firstUrl && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void downloadImage(firstUrl, modelName);
+                      }}
+                      disabled={isBusy}
+                      aria-label="Download"
+                      title="Download"
+                      className="gfm-icon-btn"
+                      style={iconButtonStyle(theme)}
+                    >
+                      <DownloadIcon />
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+          {/* Try Again is a trailing pseudo-card — keeps the action
+              visually paired with the newest result without growing
+              another button into the result-card footers. */}
           <button
             type="button"
-            onClick={() => {
-              void downloadImage(firstUrl, modelName);
-            }}
+            onClick={onTryAgain}
             disabled={isBusy}
             className="gfm-link"
             style={{
               ...linkButtonStyle(),
               color: theme === 'dark' ? BRAND_LIGHT_DARK : BRAND,
+              alignSelf: 'center',
+              padding: '0 8px',
+              whiteSpace: 'nowrap',
             }}
           >
-            Download
+            Try again
           </button>
-        )}
-        <button
-          type="button"
-          onClick={onTryAgain}
-          disabled={isBusy}
-          className="gfm-link"
-          style={{
-            ...linkButtonStyle(),
-            color: theme === 'dark' ? BRAND_LIGHT_DARK : BRAND,
-          }}
-        >
-          Try again
-        </button>
+        </div>
       </div>
     </div>
   );
@@ -1466,6 +1565,62 @@ function LoadingSkeleton({ theme }: { theme: string | null }) {
 }
 
 /**
+ * Tier-4 Delta C: 16×16 lightning-bolt glyph rendered inline as SVG.
+ * Visually anchors the Generate / Top-Up buttons to the Buzz currency
+ * (Buzz uses a bolt as its mark on Civitai). currentColor + 16×16
+ * intrinsic so the parent button's text color drives the fill and the
+ * glyph aligns with the 14px label text.
+ *
+ * Inline SVG (vs pulling @tabler/icons-react) keeps the dependency tree
+ * flat — this block is a single-file UI, no icon lib for one glyph.
+ * Path is the canonical Tabler Bolt: M13 3L4 14h7l-1 7l9-11h-7l1-7z.
+ */
+function BoltIcon() {
+  return (
+    <svg
+      aria-hidden
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flex: '0 0 auto', display: 'inline-block', verticalAlign: 'middle' }}
+    >
+      <path d="M13 3L4 14h7l-1 7l9-11h-7l1-7z" />
+    </svg>
+  );
+}
+
+/**
+ * Tier-4 Delta B: 16×16 download arrow for the per-result icon button on
+ * each carousel card. currentColor again — the icon button styles the
+ * color (subtle by default, brand on hover).
+ */
+function DownloadIcon() {
+  return (
+    <svg
+      aria-hidden
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flex: '0 0 auto', display: 'block' }}
+    >
+      <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
+      <polyline points="7 11 12 16 17 11" />
+      <line x1="12" y1="4" x2="12" y2="16" />
+    </svg>
+  );
+}
+
+/**
  * 6px brand-color dot with a quiet opacity pulse — used to signal active
  * busy states (estimating / submitting / polling) without an explicit
  * spinner. Subtle enough to live next to or inside the primary CTA.
@@ -1488,27 +1643,41 @@ function Pulse() {
 
 // --------- design tokens ---------
 
-// Civitai brand blue. Tier-3 #5 nudges the CTA brighter — Generate now
-// uses blue[6] (#228BE6) as its base; hover lands on blue[7] (#1C7ED6);
-// active sinks to blue[8] (#1971C2). The old single-token `BRAND` stays
-// for non-CTA surfaces (focus rings, link text) where the deeper blue
-// reads more "stable affordance" than "primary action."
+// Civitai brand blue. Brand blue is reserved for the host page's primary
+// "Create" CTA and for our own non-CTA affordances (focus rings, inline
+// link buttons). The Generate / Top-Up buttons used to share this brand
+// blue, which made them compete visually with the host page's main
+// action — Tier-4 Delta C moves them to a Buzz-spend amber instead.
 const BRAND = '#1971C2';
 const BRAND_HOVER = '#1864AB';
-const CTA = '#228BE6'; // blue[6] — brighter base for the Generate button
-const CTA_HOVER = '#1C7ED6'; // blue[7]
-const CTA_ACTIVE = '#1971C2'; // blue[8]
-const CTA_GLOW_LIGHT = '0 4px 14px rgba(34, 139, 230, 0.35)';
-const CTA_GLOW_LIGHT_HOVER = '0 6px 20px rgba(34, 139, 230, 0.45)';
-const CTA_GLOW_DARK = '0 4px 14px rgba(34, 139, 230, 0.45)';
-const CTA_GLOW_DARK_HOVER = '0 6px 20px rgba(34, 139, 230, 0.55)';
 const BRAND_LIGHT_DARK = '#4DABF7'; // blue[4] — readable on dark surfaces
 const FOCUS_RING = 'rgba(25, 113, 194, 0.35)';
+
+// Tier-4 Delta C: Buzz-spend amber palette. The Generate button label
+// already reads "Generate · 34 Buzz" — pairing it with the Buzz currency
+// color ties the affordance to the spend in a way blue couldn't. Mantine
+// yellow[6/7/8] for base/hover/active. Text color #5C3B00 (dark brown)
+// passes WCAG AA on amber (≈5.6:1 contrast).
+const CTA = '#FAB005'; // yellow[6] — base amber
+const CTA_HOVER = '#F59F00'; // yellow[7]
+const CTA_ACTIVE = '#F08C00'; // yellow[8]
+const CTA_TEXT = '#5C3B00'; // dark brown — ≥4.5:1 contrast on the amber
+const CTA_GLOW_LIGHT = '0 4px 14px rgba(250, 176, 5, 0.35)';
+const CTA_GLOW_LIGHT_HOVER = '0 6px 20px rgba(250, 176, 5, 0.45)';
+const CTA_GLOW_DARK = '0 4px 14px rgba(250, 176, 5, 0.45)';
+const CTA_GLOW_DARK_HOVER = '0 6px 20px rgba(250, 176, 5, 0.55)';
+const CTA_FOCUS_RING = 'rgba(250, 176, 5, 0.45)';
 
 // Tier-3 #9: ceiling for the auto-growing prompt textarea. ~5 lines of
 // the 14px base font with the default line-height keeps it bounded so
 // runaway pastes don't blow out the iframe.
 const MAX_PROMPT_HEIGHT = 120;
+
+// Tier-4 Delta B: cap on accumulated past-results before FIFO eviction.
+// Each card is ~240×360px; 8 keeps the carousel scroll length tractable
+// AND keeps the in-memory snapshot array bounded so a long-running
+// session can't grow unbounded.
+const MAX_RESULTS = 8;
 
 // --------- styles (inline; the host injects [data-theme]) ---------
 
@@ -1516,11 +1685,20 @@ const MAX_PROMPT_HEIGHT = 120;
 // often busy, so a 1px border + a subtle outset shadow (light theme
 // only) helps the block read as a discrete surface rather than blending
 // into the model page.
-const containerStyle = (theme: string | null): CSSProperties => ({
-  padding: 16,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 12,
+//
+// Tier-4 Delta A: split into an outer (rootRef-bound) and an inner
+// (padded layout) wrapper. The SDK's `useBlockResize` reads
+// `ResizeObserverEntry.contentRect.height`, which is the CONTENT-box of
+// the observed element — so any padding on rootRef gets silently shaved
+// off the reported height (the iframe stays ~32px short of what the
+// content actually wants). Moving the padding onto a non-observed inner
+// element makes the outer's content-box equal the full visual layout.
+//
+// `box-sizing: border-box` is set defensively so any future width/height
+// constraints behave predictably with the border.
+const outerContainerStyle = (theme: string | null): CSSProperties => ({
+  boxSizing: 'border-box',
+  display: 'block',
   // Match host font stack — same list Civitai uses in tailwind.config.js.
   fontFamily:
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
@@ -1529,6 +1707,15 @@ const containerStyle = (theme: string | null): CSSProperties => ({
   border: `1px solid ${theme === 'dark' ? '#373A40' : '#dee2e6'}`,
   borderRadius: 12,
   boxShadow: theme === 'dark' ? 'none' : '0 1px 2px rgba(0, 0, 0, 0.04)',
+  // Important: do NOT set padding here. See Delta A note above.
+});
+
+const innerContainerStyle = (): CSSProperties => ({
+  boxSizing: 'border-box',
+  padding: 16,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 12,
 });
 
 // Tier-3 #1, #2, #3: header is title + three-dots action button on the
@@ -1700,9 +1887,12 @@ const textareaStyle = (theme: string | null): CSSProperties => ({
   lineHeight: 1.4,
 });
 
-// Tier-3 #5: brighter, bolder primary CTA. Brand glow + larger pad +
-// font-weight bump. Hover behavior (translate, shadow grow) lives in
-// the CSS stylesheet since :hover can't be inlined.
+// Tier-3 #5 + Tier-4 Delta C: bold primary CTA, now Buzz-spend amber so
+// it visually pairs with the cost in the label and stops competing with
+// the host page's brand-blue "Create" button. Text is dark brown
+// (CTA_TEXT) which clears WCAG AA on amber. Hover/active behavior
+// (translate, shadow grow, deeper amber) lives in the CSS stylesheet
+// since :hover can't be inlined.
 const primaryButtonStyle = (busy: boolean): CSSProperties => ({
   display: 'inline-flex',
   alignItems: 'center',
@@ -1711,7 +1901,7 @@ const primaryButtonStyle = (busy: boolean): CSSProperties => ({
   padding: '12px 16px',
   borderRadius: 8,
   background: CTA,
-  color: '#ffffff',
+  color: CTA_TEXT,
   fontSize: 14,
   fontWeight: 700,
   border: 'none',
@@ -1769,37 +1959,79 @@ const insufficientCopyStyle = (theme: string | null): CSSProperties => ({
   color: theme === 'dark' ? '#C1C2C5' : '#495057',
 });
 
-// Tier-2 #7: row that contains the spent-buzz line on the left and the
-// inline Download / Try again actions on the right. Wraps to a second
-// row on narrow widths so the buttons stay tappable.
-const resultActionsRowStyle: CSSProperties = {
+// Tier-4 Delta B: horizontal-scrolling carousel for past results.
+// Shares the `gfm-carousel` className with the showcase thumbs row so
+// the scrollbar-hiding + soft-fade-on-right CSS applies for free.
+// Cards laid out flex-nowrap so the user gets a clear "more →" hint
+// without an explicit affordance.
+const resultsCarouselStyle: CSSProperties = {
   display: 'flex',
-  alignItems: 'center',
-  flexWrap: 'wrap',
-  gap: 12,
-  marginTop: 4,
+  gap: 10,
+  flexWrap: 'nowrap',
+  overflowX: 'auto',
+  overflowY: 'hidden',
+  padding: '4px 2px',
+  scrollSnapType: 'x proximity',
 };
 
-// Tier-3 #7, #8: 8px corner radius (matches the carousel thumbs) + a
-// height cap so multi-megapixel results don't blow out the iframe.
-// `object-fit: contain` is implicit (not set) since the image is
-// constrained on both axes; the natural aspect ratio is preserved.
-const imageStyle = (theme: string | null): CSSProperties => ({
+// Per-card container: fixed 240px width so all cards align regardless of
+// aspect ratio. The image flexes inside the card's max-height cap; the
+// footer (spent buzz + download) is a single row below.
+const resultCardStyle = (theme: string | null): CSSProperties => ({
+  flex: '0 0 240px',
+  width: 240,
+  display: 'flex',
+  flexDirection: 'column',
+  gap: 6,
+  padding: 8,
+  borderRadius: 10,
+  background: theme === 'dark' ? '#1A1B1E' : '#ffffff',
+  border: `1px solid ${theme === 'dark' ? '#2C2E33' : '#e9ecef'}`,
+  boxShadow:
+    theme === 'dark'
+      ? '0 1px 3px rgba(0, 0, 0, 0.35)'
+      : '0 1px 3px rgba(0, 0, 0, 0.06)',
+  scrollSnapAlign: 'start',
+});
+
+// Image cap inside a card. 320px lets several cards fit on screen at
+// once so the comparison is meaningful — bigger and the user only sees
+// one card at a time, defeating the carousel.
+const resultCardImageStyle = (_theme: string | null): CSSProperties => ({
   maxWidth: '100%',
-  // Tier-3 #8: hard cap on rendered height. 480px keeps the result
-  // visible without overflowing the iframe past the manifest's 1600px
-  // ceiling when Advanced is also open.
-  maxHeight: 480,
+  maxHeight: 320,
   width: '100%',
   height: 'auto',
   objectFit: 'contain',
   borderRadius: 8,
   display: 'block',
-  marginBottom: 8,
-  boxShadow:
-    theme === 'dark'
-      ? '0 1px 3px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255, 255, 255, 0.04)'
-      : '0 1px 3px rgba(0, 0, 0, 0.06), 0 0 0 1px rgba(0, 0, 0, 0.04)',
+  background: 'transparent',
+});
+
+// Footer row inside a card: spent-buzz line on the left, compact icon
+// Download button on the right.
+const resultCardFooterStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  marginTop: 2,
+};
+
+// 28×28 ghost icon button. Subtle by default, brand-tinted on hover.
+const iconButtonStyle = (theme: string | null): CSSProperties => ({
+  display: 'inline-flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  width: 28,
+  height: 28,
+  padding: 0,
+  borderRadius: 6,
+  border: '1px solid transparent',
+  background: 'transparent',
+  color: theme === 'dark' ? '#C1C2C5' : '#495057',
+  cursor: 'pointer',
+  transition:
+    'background-color 140ms ease-out, color 140ms ease-out, border-color 140ms ease-out',
 });
 
 const advancedWrapperStyle = (theme: string | null): CSSProperties => ({
@@ -1927,12 +2159,15 @@ const STYLESHEET_CSS = `
   cursor: not-allowed;
   opacity: 0.78;
 }
+/* Tier-4 Delta C: focus ring is amber-tinted to match the button. The
+   blue FOCUS_RING would clash with the gold fill; CTA_FOCUS_RING shares
+   the button's hue so the affordance reads as one element. */
 .gfm-primary:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 3px ${FOCUS_RING}, ${CTA_GLOW_LIGHT};
+  box-shadow: 0 0 0 3px ${CTA_FOCUS_RING}, ${CTA_GLOW_LIGHT};
 }
 [data-theme="dark"] .gfm-primary:focus-visible {
-  box-shadow: 0 0 0 3px ${FOCUS_RING}, ${CTA_GLOW_DARK};
+  box-shadow: 0 0 0 3px ${CTA_FOCUS_RING}, ${CTA_GLOW_DARK};
 }
 
 /* Tier-3 #3: three-dots advanced toggle. Subtle hover tint so the
@@ -2021,6 +2256,26 @@ const STYLESHEET_CSS = `
   cursor: not-allowed;
 }
 
+/* Tier-4 Delta B: per-card Download icon button. Ghost by default —
+   tints to brand on hover so the user gets a positive affordance signal
+   without competing with the gold Generate button for attention. */
+.gfm-icon-btn:not(:disabled):hover {
+  background-color: rgba(125, 125, 125, 0.08);
+  color: ${BRAND};
+}
+[data-theme="dark"] .gfm-icon-btn:not(:disabled):hover {
+  background-color: rgba(255, 255, 255, 0.06);
+  color: ${BRAND_LIGHT_DARK};
+}
+.gfm-icon-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px ${FOCUS_RING};
+}
+.gfm-icon-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 @media (prefers-reduced-motion: reduce) {
   /* Respect user accessibility preference — host theme also sets this. */
   .gfm-fade-in,
@@ -2028,13 +2283,14 @@ const STYLESHEET_CSS = `
   .gfm-thumb,
   .gfm-primary,
   .gfm-input,
-  .gfm-dots-btn {
+  .gfm-dots-btn,
+  .gfm-icon-btn {
     animation: none !important;
     transition: none !important;
   }
-  /* Tier-3 #5: the primary CTA's hover transform is the loudest part
-     of the motion budget — kill the lift + the shadow growth, keep the
-     color shift since color isn't motion. */
+  /* Tier-3 #5 + Tier-4 Delta C: the primary CTA's hover transform is the
+     loudest part of the motion budget — kill the lift + the shadow growth,
+     keep the color shift since color isn't motion. */
   .gfm-primary:not(:disabled):hover,
   .gfm-primary:not(:disabled):active {
     transform: none !important;
