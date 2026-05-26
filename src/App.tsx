@@ -70,6 +70,12 @@ export function App() {
   // then auto-reset. Picking a new showcase also resets it (selecting an
   // image is a "use this seed" signal — see Gap 2 design notes).
   const [randomizeSeedOnce, setRandomizeSeedOnce] = useState(false);
+  // Tier-3 #11: track which showcase the user last submitted Generate for.
+  // The 2nd+ Generate click on the same showcase auto-randomizes the seed
+  // (so "Re-generate" means "give me a different roll, same showcase").
+  // Cleared when the user switches showcases (a new image is a "use its
+  // seed" signal — same as the existing reset effect on selection change).
+  const [lastSubmittedShowcaseIdx, setLastSubmittedShowcaseIdx] = useState<number | null>(null);
   // Mirror the host-supplied checkpoint locally so the UI updates the
   // instant the user picks a new one. The host re-resolves at submit
   // time anyway — this is just for the label-in-the-header.
@@ -233,6 +239,10 @@ export function App() {
     }
     setOverrides({});
     setRandomizeSeedOnce(false);
+    // Tier-3 #11b: switching showcases resets the re-generate counter so
+    // the FIRST submit for the new showcase uses its own seed (not a
+    // random one). The 2nd submit then flips to random.
+    setLastSubmittedShowcaseIdx(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedShowcaseIdx]);
 
@@ -305,7 +315,12 @@ export function App() {
   if (!viewer) {
     return (
       <div ref={rootRef} style={containerStyle(theme)}>
-        <Header model={model} checkpoint={model.checkpoint ?? null} theme={theme} />
+        <Header
+          theme={theme}
+          advancedOpen={advancedOpen}
+          onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
+          isBusy={true}
+        />
         <p style={subtleStyle}>Sign in to generate.</p>
       </div>
     );
@@ -314,7 +329,12 @@ export function App() {
   if (viewer.status === 'banned' || viewer.status === 'muted') {
     return (
       <div ref={rootRef} style={containerStyle(theme)}>
-        <Header model={model} checkpoint={model.checkpoint ?? null} theme={theme} />
+        <Header
+          theme={theme}
+          advancedOpen={advancedOpen}
+          onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
+          isBusy={true}
+        />
         <p style={subtleStyle}>
           Account status is <strong>{viewer.status}</strong>. Generation is unavailable.
         </p>
@@ -370,19 +390,60 @@ export function App() {
   const busy: WorkflowStatus[] = ['estimating', 'submitting', 'polling'];
   const isBusy = busy.includes(status);
 
+  // Tier-3 #11: Re-generate semantics. If the user already submitted for
+  // THIS showcase (without switching since), the next Generate is treated
+  // as "Re-generate" — auto-arm the randomize-seed-once flag for this
+  // submission. The manual 🎲 button still works independently; this is
+  // an additional auto-arm path, not a replacement.
+  const isRegenerate =
+    selectedShowcaseIdx != null && lastSubmittedShowcaseIdx === selectedShowcaseIdx;
+
+  // Tier-3 #11a: Try-again ALWAYS randomizes the seed. The user just
+  // saw the showcase's seed render; clicking "Try again" is the obvious
+  // "give me a different one" affordance. Skip the React-state hop and
+  // pass the flag directly to the submit path.
+  const handleTryAgain = async () => {
+    try {
+      const params = buildSubmitParams(prompt, suffix, selectedShowcase, overrides, true);
+      // Sync state with what we just did so subsequent Generate clicks
+      // continue to randomize (consistent with the re-generate counter).
+      if (selectedShowcaseIdx != null) {
+        setLastSubmittedShowcaseIdx(selectedShowcaseIdx);
+      }
+      await submit({
+        kind: 'textToImage',
+        modelId: model.modelId,
+        modelVersionId: model.modelVersionId,
+        params,
+      });
+    } catch {
+      // Same as handleGenerate — surface via `error` in render.
+    }
+  };
+
   const handleGenerate = async () => {
     try {
+      // Either the user pressed 🎲 (manual), or this is a re-gen on the
+      // same showcase (auto). Both paths drop the seed for this submit.
+      const randomizeForThisSubmit = randomizeSeedOnce || isRegenerate;
       const params = buildSubmitParams(
         prompt,
         suffix,
         selectedShowcase,
         overrides,
-        randomizeSeedOnce
+        randomizeForThisSubmit
       );
       // Reset the one-shot randomize flag after consuming it so the
       // *next* submit reverts to the showcase's seed (unless the user
       // clicks 🎲 again). Important: must run after the build call.
       if (randomizeSeedOnce) setRandomizeSeedOnce(false);
+      // Mark THIS showcase as having had a Generate fired against it so
+      // the next click flips to re-generate (random seed). Do this
+      // before awaiting submit so the button label updates on the next
+      // render (the state change is what makes "Re-generate" appear).
+      if (selectedShowcaseIdx != null) {
+        setLastSubmittedShowcaseIdx(selectedShowcaseIdx);
+      }
       await submit({
         kind: 'textToImage',
         modelId: model.modelId,
@@ -410,7 +471,12 @@ export function App() {
   return (
     <div ref={rootRef} style={containerStyle(theme)}>
       <StyleSheet />
-      <Header model={model} checkpoint={effectiveCheckpoint} theme={theme} />
+      <Header
+        theme={theme}
+        advancedOpen={advancedOpen}
+        onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
+        isBusy={isBusy}
+      />
 
       {checkpointError && (
         <p style={errorTextStyle}>Checkpoint: {checkpointError}</p>
@@ -446,19 +512,16 @@ export function App() {
       )}
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-        <input
-          aria-label="Prompt (optional)"
-          placeholder="Describe what you want (or hit Generate to use the preview)"
+        <PromptTextarea
           value={prompt}
-          onChange={(e) => setPrompt(e.target.value)}
-          className="gfm-input"
-          style={inputStyle(theme)}
+          onChange={setPrompt}
+          onSubmit={handleGenerate}
           disabled={isBusy}
+          theme={theme}
         />
 
         <AdvancedSection
           open={advancedOpen}
-          onToggle={() => setAdvancedOpen((v) => !v)}
           editable={showAdvanced}
           showcase={selectedShowcase}
           overrides={overrides}
@@ -481,7 +544,7 @@ export function App() {
           style={primaryButtonStyle(isBusy)}
         >
           {isBusy && <Pulse />}
-          <span>{labelForStatus(status, budget, estimatedCost)}</span>
+          <span>{labelForStatus(status, budget, estimatedCost, isRegenerate)}</span>
         </button>
 
         {estimateError && (
@@ -523,7 +586,7 @@ export function App() {
           theme={theme}
           modelName={model.modelName}
           isBusy={isBusy}
-          onTryAgain={handleGenerate}
+          onTryAgain={handleTryAgain}
         />
       )}
     </div>
@@ -532,108 +595,118 @@ export function App() {
 
 // --------- helpers ---------
 
-function Header({
-  model,
-  checkpoint,
+/**
+ * Tier-3 #9: prompt input is a textarea (was a single-line input). Most
+ * useful prompts are multi-line; cramming them into one line and clipping
+ * everything past the visible width was hostile UX. Auto-grow caps at
+ * ~5 lines (max-height) so a runaway paste can't blow the iframe out.
+ *
+ * Keyboard shortcut: Ctrl/Cmd+Enter submits (rather than rebinding plain
+ * Enter, which would block multi-line entry). The aria-label stays
+ * 'Prompt (optional)' for parity with the existing test selectors.
+ */
+function PromptTextarea({
+  value,
+  onChange,
+  onSubmit,
+  disabled,
   theme,
 }: {
-  model: ModelSlotContext;
-  checkpoint: BlockCheckpointInfo | null;
+  value: string;
+  onChange: (next: string) => void;
+  onSubmit: () => void | Promise<void>;
+  disabled: boolean;
   theme: string | null;
 }) {
-  const chipLabel = formatModelTypeChip(model.modelType, checkpoint?.baseModel ?? null);
+  const ref = useRef<HTMLTextAreaElement>(null);
+
+  // Auto-grow: resize the textarea to fit content up to the max-height
+  // cap. Browsers that support `field-sizing: content` get this for free
+  // via CSS; the effect is a fallback for everyone else. Runs on every
+  // value change so paste/delete both reflow.
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // Skip when CSS field-sizing is honored — the browser will manage
+    // the height itself, and JS-poking the style fights it.
+    try {
+      const fs = window.getComputedStyle(el).getPropertyValue('field-sizing');
+      if (fs && fs.trim().toLowerCase() === 'content') return;
+    } catch {
+      // getComputedStyle should always exist in JSDOM, but be defensive.
+    }
+    // Reset to auto so scrollHeight reflects content, not the prior set
+    // height. Then clamp to the max-height ceiling.
+    el.style.height = 'auto';
+    const next = Math.min(el.scrollHeight, MAX_PROMPT_HEIGHT);
+    el.style.height = `${next}px`;
+  }, [value]);
+
   return (
-    <header style={headerStyle}>
-      <h3 style={headerTitleStyle}>Generate from this model</h3>
-      <div style={headerSubRowStyle}>
-        <small style={{ ...subtleStyle, opacity: 0.85 }}>{model.modelName}</small>
-        {chipLabel && (
-          <>
-            <span style={headerDotStyle} aria-hidden>
-              ·
-            </span>
-            <span style={headerChipStyle(theme)}>{chipLabel}</span>
-          </>
-        )}
-      </div>
-    </header>
+    <textarea
+      ref={ref}
+      aria-label="Prompt (optional)"
+      placeholder="Describe what you want (or hit Generate to use the preview)"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      onKeyDown={(e) => {
+        // Ctrl/Cmd+Enter submits — same convention as Slack, Discord,
+        // ChatGPT, etc. Plain Enter falls through to the textarea so the
+        // user can write multi-line prompts.
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+          e.preventDefault();
+          if (!disabled) void onSubmit();
+        }
+      }}
+      rows={2}
+      className="gfm-input gfm-textarea"
+      style={textareaStyle(theme)}
+      disabled={disabled}
+    />
   );
 }
 
 /**
- * Map a `BlockCheckpointInfo.baseModel` string to the short ecosystem label
- * we use in the header chip. Variant collapsing keeps the chip readable
- * across the long tail (Flux.1 D / Flux.1 S / Flux.1 Kontext all → "Flux").
- * Unknown bases fall through to the raw string — better than dropping the
- * chip silently when a new ecosystem ships.
+ * Tier-3 #1, #2, #3: header is just the title + a three-dots advanced
+ * toggle. The Tier-1 subtitle (model name + ecosystem chip) was a power-
+ * user signal that 90% of users ignore; deleting it reclaims vertical
+ * space inside the iframe. The model identity is already obvious from
+ * the surrounding page context (the block sits on the model page).
+ *
+ * The three-dots button is the SOLE trigger for the AdvancedSection
+ * (the inline `⚙ Advanced` toggle that lived below the prompt is gone).
+ * Sectionbody still renders below the prompt; we just moved the trigger.
  */
-function deriveEcosystem(baseModel: string | null): string | null {
-  if (!baseModel) return null;
-  const b = baseModel.trim();
-  if (!b) return null;
-  if (b.startsWith('Flux')) return 'Flux';
-  if (b.startsWith('SDXL')) return 'SDXL';
-  if (b === 'Illustrious') return 'Illustrious';
-  if (b === 'Pony') return 'Pony';
-  if (b === 'NoobAI') return 'NoobAI';
-  if (b === 'SD 1.5' || b === 'SD 1.4') return 'SD1.5';
-  if (b.startsWith('SD 2')) return 'SD2';
-  return b;
-}
-
-/**
- * Combine `modelType` (e.g. 'LORA', 'Checkpoint') with the derived
- * ecosystem into a human-readable chip — "Flux LoRA", "SDXL Checkpoint",
- * "Illustrious LoRA", etc. Returns null when we have nothing useful to
- * show (no checkpoint info AND no recognizable modelType).
- */
-function formatModelTypeChip(modelType: string | null, baseModel: string | null): string | null {
-  const eco = deriveEcosystem(baseModel);
-  const type = formatModelType(modelType);
-  if (!eco && !type) return null;
-  if (eco && type) return `${eco} ${type}`;
-  return eco ?? type;
-}
-
-function formatModelType(modelType: string | null): string | null {
-  if (!modelType) return null;
-  // Map upper-snake enum-ish strings the host sends to title-case display.
-  switch (modelType) {
-    case 'LORA':
-      return 'LoRA';
-    case 'LoCon':
-    case 'LOCON':
-      return 'LoCon';
-    case 'TextualInversion':
-    case 'TEXTUAL_INVERSION':
-      return 'Embedding';
-    case 'Hypernetwork':
-    case 'HYPERNETWORK':
-      return 'Hypernetwork';
-    case 'AestheticGradient':
-      return 'Aesthetic Gradient';
-    case 'Controlnet':
-    case 'CONTROLNET':
-      return 'ControlNet';
-    case 'Checkpoint':
-    case 'CHECKPOINT':
-      return 'Checkpoint';
-    case 'VAE':
-      return 'VAE';
-    case 'Upscaler':
-    case 'UPSCALER':
-      return 'Upscaler';
-    case 'Poses':
-      return 'Poses';
-    case 'Wildcards':
-      return 'Wildcards';
-    case 'Workflows':
-      return 'Workflows';
-    case 'Other':
-      return 'Other';
-    default:
-      return modelType;
-  }
+function Header({
+  theme,
+  advancedOpen,
+  onToggleAdvanced,
+  isBusy,
+}: {
+  theme: string | null;
+  advancedOpen: boolean;
+  onToggleAdvanced: () => void;
+  isBusy: boolean;
+}) {
+  return (
+    <header style={headerStyle}>
+      <h3 style={headerTitleStyle}>Quick Sample</h3>
+      <button
+        type="button"
+        onClick={onToggleAdvanced}
+        aria-label="Advanced settings"
+        aria-expanded={advancedOpen}
+        aria-controls="block-advanced"
+        disabled={isBusy}
+        className="gfm-dots-btn"
+        style={dotsButtonStyle(advancedOpen, theme)}
+      >
+        <span aria-hidden style={{ fontSize: 18, lineHeight: 1, letterSpacing: 1 }}>
+          ⋯
+        </span>
+      </button>
+    </header>
+  );
 }
 
 /**
@@ -650,7 +723,6 @@ function formatModelType(modelType: string | null): string | null {
  */
 function AdvancedSection(props: {
   open: boolean;
-  onToggle: () => void;
   editable: boolean;
   showcase: ShowcaseImage | null;
   overrides: ParamOverrides;
@@ -669,7 +741,6 @@ function AdvancedSection(props: {
 }) {
   const {
     open,
-    onToggle,
     editable,
     showcase,
     overrides,
@@ -699,22 +770,21 @@ function AdvancedSection(props: {
   };
 
   return (
-    <div style={advancedWrapperStyle(theme)}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        className="gfm-advanced-toggle"
-        style={advancedToggleStyle(theme)}
-      >
-        <span>⚙ Advanced {editable ? '' : '(read-only)'}</span>
-        <span style={{ opacity: 0.6, transition: 'transform 180ms ease-out', transform: open ? 'rotate(90deg)' : 'rotate(0deg)' }}>▸</span>
-      </button>
-      <div
-        aria-hidden={!open}
-        style={advancedCollapseStyle(open)}
-      >
+    <div
+      id="block-advanced"
+      aria-hidden={!open}
+      style={advancedCollapseStyle(open)}
+    >
+      <div style={advancedWrapperStyle(theme)}>
         <div style={advancedBodyStyle(theme)}>
+          {!editable && (
+            // The "(read-only)" affordance used to live in the inline
+            // toggle copy. Now the three-dots is iconic only, so surface
+            // the read-only state as a small label inside the body.
+            <p style={{ ...subtleStyle, fontSize: 12, margin: '0 0 8px 0' }}>
+              Advanced (read-only)
+            </p>
+          )}
           {showCheckpointPicker && (
             <div style={{ ...checkpointRowStyle(theme), marginBottom: 10 }}>
               <span style={subtleStyle}>
@@ -1020,18 +1090,25 @@ function Result({
   isBusy: boolean;
   onTryAgain: () => void | Promise<void>;
 }) {
+  // Tier-3 #8: cap the result image to a sane viewport height. Without
+  // this a 2048×2048 generated image renders at 2048px tall and blows
+  // the iframe past the manifest's 1600px ceiling. `object-fit: contain`
+  // preserves aspect ratio inside the cap.
+  // Block is single-image v1 — render the first URL only. Multi-image
+  // results would otherwise stack vertically without limit; we'll
+  // revisit when the block exposes a quantity slider.
   const firstUrl = snapshot.imageUrls?.[0] ?? null;
   return (
     <div className="gfm-fade-in" style={{ marginTop: 8 }}>
-      {snapshot.imageUrls?.map((url, i) => (
+      {firstUrl && (
         <img
-          key={url}
-          src={url}
-          alt={`Generation ${i + 1}`}
+          key={firstUrl}
+          src={firstUrl}
+          alt="Generation 1"
           style={imageStyle(theme)}
           loading="lazy"
         />
-      ))}
+      )}
       <div style={resultActionsRowStyle}>
         {snapshot.cost?.total != null ? (
           <p style={{ ...subtleStyle, marginRight: 'auto' }}>
@@ -1046,7 +1123,9 @@ function Result({
         {firstUrl && (
           <button
             type="button"
-            onClick={() => downloadImage(firstUrl, modelName)}
+            onClick={() => {
+              void downloadImage(firstUrl, modelName);
+            }}
             disabled={isBusy}
             className="gfm-link"
             style={{
@@ -1077,7 +1156,8 @@ function Result({
 function labelForStatus(
   status: WorkflowStatus,
   budget: number,
-  estimatedCost: number | null
+  estimatedCost: number | null,
+  isRegenerate = false
 ): string {
   // SDK status semantics:
   //   estimating  — cost lookup in flight (busy)
@@ -1089,6 +1169,9 @@ function labelForStatus(
   // Tier-2 #8: keep the cost visible during submitting/polling so the user
   // never loses sight of what they're paying for what they see. Fallback
   // mirrors the idle shape — `(≤ N Buzz)` — when no estimate has landed.
+  // Tier-3 #11c: after the first submit on a showcase the verb flips
+  // from "Generate" to "Re-generate" — the visible signal that the
+  // next click will randomize the seed.
   if (status === 'estimating') return 'Estimating cost…';
   if (status === 'submitting') {
     return estimatedCost != null
@@ -1104,9 +1187,10 @@ function labelForStatus(
   // the actual estimated cost when we have one, fall back to the
   // budget cap otherwise. Middle-dot separator reads cleaner than
   // parens for the known-cost case.
+  const verb = isRegenerate ? 'Re-generate' : 'Generate';
   return estimatedCost != null
-    ? `Generate · ${estimatedCost} Buzz`
-    : `Generate (≤ ${budget} Buzz)`;
+    ? `${verb} · ${estimatedCost} Buzz`
+    : `${verb} (≤ ${budget} Buzz)`;
 }
 
 /**
@@ -1280,29 +1364,45 @@ export function deriveDownloadFilename(modelName: string, now: Date = new Date()
 /**
  * Trigger a file download for the given image URL.
  *
- * Primary path: create a hidden `<a download>` and click it. This works
- * for same-origin URLs and for cross-origin URLs whose host returns
- * `Content-Disposition: attachment` or honors the `download` attribute.
+ * Tier-3 #10: the previous implementation set `<a download>` on a
+ * cross-origin URL, but most CDNs don't return Content-Disposition:
+ * attachment, so the browser ignored the download attribute and just
+ * navigated to the image (kicking the user out of the block).
  *
- * Fallback: on some cross-origin CDNs the browser ignores `download` and
- * navigates instead. To keep the user in the block, open the URL in a new
- * tab — at least they get the image, even if the filename isn't applied.
+ * Fix: fetch the image as a Blob first, point the anchor at a blob: URL
+ * for the SAME origin, then the download attribute IS honored. Revoke
+ * the blob URL on the next tick so the download has time to start.
  *
- * Errors are swallowed (popup blockers, JSDOM, etc.) — this is best-
- * effort UX, not load-bearing.
+ * Fallback (CORS-blocked, network down, etc.): open the URL in a new
+ * tab. Same as before — the user at least gets the image.
  */
-export function downloadImage(url: string, modelName: string): void {
+export async function downloadImage(url: string, modelName: string): Promise<void> {
   const filename = deriveDownloadFilename(modelName);
   try {
+    const res = await fetch(url, { mode: 'cors', credentials: 'omit' });
+    if (!res.ok) throw new Error(`download failed: ${res.status}`);
+    const blob = await res.blob();
+    const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = url;
+    a.href = blobUrl;
     a.download = filename;
     a.rel = 'noopener';
+    a.style.display = 'none';
     // Anchors not in the document don't always trigger downloads on
-    // Firefox — append, click, then remove to be safe.
+    // Firefox — append, click, then remove.
     document.body.appendChild(a);
     a.click();
     a.remove();
+    // Defer revoke so the browser has time to start the download.
+    // Safari is the strictest here — 0ms is enough in Chrome/FF but
+    // a generous 1s keeps the cross-browser surface clean.
+    setTimeout(() => {
+      try {
+        URL.revokeObjectURL(blobUrl);
+      } catch {
+        // Already revoked or never registered — fine.
+      }
+    }, 1000);
   } catch {
     // Fallback: open in a new tab so the user at least gets the image.
     try {
@@ -1388,15 +1488,34 @@ function Pulse() {
 
 // --------- design tokens ---------
 
-// Civitai brand blue (Mantine blue[8] = #1971C2). Hover lands on blue[9]
-// (#1864AB). Light variants used for focus rings + dark-theme link text.
+// Civitai brand blue. Tier-3 #5 nudges the CTA brighter — Generate now
+// uses blue[6] (#228BE6) as its base; hover lands on blue[7] (#1C7ED6);
+// active sinks to blue[8] (#1971C2). The old single-token `BRAND` stays
+// for non-CTA surfaces (focus rings, link text) where the deeper blue
+// reads more "stable affordance" than "primary action."
 const BRAND = '#1971C2';
 const BRAND_HOVER = '#1864AB';
+const CTA = '#228BE6'; // blue[6] — brighter base for the Generate button
+const CTA_HOVER = '#1C7ED6'; // blue[7]
+const CTA_ACTIVE = '#1971C2'; // blue[8]
+const CTA_GLOW_LIGHT = '0 4px 14px rgba(34, 139, 230, 0.35)';
+const CTA_GLOW_LIGHT_HOVER = '0 6px 20px rgba(34, 139, 230, 0.45)';
+const CTA_GLOW_DARK = '0 4px 14px rgba(34, 139, 230, 0.45)';
+const CTA_GLOW_DARK_HOVER = '0 6px 20px rgba(34, 139, 230, 0.55)';
 const BRAND_LIGHT_DARK = '#4DABF7'; // blue[4] — readable on dark surfaces
 const FOCUS_RING = 'rgba(25, 113, 194, 0.35)';
 
+// Tier-3 #9: ceiling for the auto-growing prompt textarea. ~5 lines of
+// the 14px base font with the default line-height keeps it bounded so
+// runaway pastes don't blow out the iframe.
+const MAX_PROMPT_HEIGHT = 120;
+
 // --------- styles (inline; the host injects [data-theme]) ---------
 
+// Tier-3 #4: borderfied + slightly rounded container. The host page is
+// often busy, so a 1px border + a subtle outset shadow (light theme
+// only) helps the block read as a discrete surface rather than blending
+// into the model page.
 const containerStyle = (theme: string | null): CSSProperties => ({
   padding: 16,
   display: 'flex',
@@ -1406,15 +1525,20 @@ const containerStyle = (theme: string | null): CSSProperties => ({
   fontFamily:
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   color: theme === 'dark' ? '#C1C2C5' : '#222222',
-  background: theme === 'dark' ? '#1A1B1E' : '#fefefe',
-  borderRadius: 8,
+  background: theme === 'dark' ? '#1a1b1e' : '#ffffff',
+  border: `1px solid ${theme === 'dark' ? '#373A40' : '#dee2e6'}`,
+  borderRadius: 12,
+  boxShadow: theme === 'dark' ? 'none' : '0 1px 2px rgba(0, 0, 0, 0.04)',
 });
 
+// Tier-3 #1, #2, #3: header is title + three-dots action button on the
+// same row. Subtitle (model name + chip) is gone.
 const headerStyle: CSSProperties = {
   display: 'flex',
-  flexDirection: 'column',
-  gap: 2,
-  marginBottom: 4,
+  alignItems: 'center',
+  justifyContent: 'space-between',
+  gap: 8,
+  marginBottom: 0,
 };
 
 const headerTitleStyle: CSSProperties = {
@@ -1425,34 +1549,37 @@ const headerTitleStyle: CSSProperties = {
   lineHeight: 1.25,
 };
 
-const headerSubRowStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  gap: 6,
-  flexWrap: 'wrap',
-  minWidth: 0,
-};
-
-const headerDotStyle: CSSProperties = {
-  opacity: 0.45,
-  fontSize: 13,
-  lineHeight: 1,
-};
-
-// Subtle pill matching the checkpoint-row aesthetic. Uses the existing
-// surface/border tokens so it tracks light/dark without a new palette.
-const headerChipStyle = (theme: string | null): CSSProperties => ({
+// Tier-3 #3: three-dots advanced toggle. 32×32 hit area, icon centered,
+// subtle hover tint. Pressed state uses the brand color to read as
+// "active" since it's controlling the collapse of the Advanced section.
+const dotsButtonStyle = (active: boolean, theme: string | null): CSSProperties => ({
   display: 'inline-flex',
   alignItems: 'center',
-  padding: '2px 8px',
-  borderRadius: 999,
-  background: theme === 'dark' ? '#25262B' : '#f1f3f5',
-  border: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
-  fontSize: 12,
-  fontWeight: 500,
-  lineHeight: 1.5,
-  color: 'inherit',
-  whiteSpace: 'nowrap',
+  justifyContent: 'center',
+  width: 32,
+  height: 32,
+  padding: 0,
+  borderRadius: 6,
+  border: '1px solid transparent',
+  background: active
+    ? theme === 'dark'
+      ? 'rgba(34, 139, 230, 0.18)'
+      : 'rgba(34, 139, 230, 0.12)'
+    : 'transparent',
+  color: active
+    ? theme === 'dark'
+      ? BRAND_LIGHT_DARK
+      : BRAND
+    : 'inherit',
+  cursor: 'pointer',
+  transition: 'background-color 140ms ease-out, color 140ms ease-out, opacity 140ms ease-out',
+  // Brand outline on the active state so it reads as toggled-on without
+  // shouting.
+  borderColor: active
+    ? theme === 'dark'
+      ? 'rgba(77, 171, 247, 0.32)'
+      : 'rgba(34, 139, 230, 0.28)'
+    : 'transparent',
 });
 
 const checkpointRowStyle = (theme: string | null): CSSProperties => ({
@@ -1492,25 +1619,28 @@ const carouselStyle: CSSProperties = {
   scrollSnapType: 'x proximity',
 };
 
+// Tier-3 #6, #7: bigger thumb (was 56×56) + slightly larger radius. The
+// showcase carousel is the most-clicked surface, so paying vertical
+// space for it is worth it.
 const thumbButtonStyle = (selected: boolean, theme: string | null): CSSProperties => ({
   padding: 0,
   border: `2px solid ${selected ? BRAND : theme === 'dark' ? '#373A40' : '#dee2e6'}`,
-  borderRadius: 6,
+  borderRadius: 8,
   background: 'transparent',
   cursor: 'pointer',
   overflow: 'hidden',
   transition: 'border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out',
   boxShadow: selected ? `0 0 0 3px ${FOCUS_RING}` : 'none',
   // Don't let flex squish thumbs when the row overflows — they should
-  // keep their 56×56 footprint and the parent scrolls instead.
+  // keep their 96×96 footprint and the parent scrolls instead.
   flex: '0 0 auto',
   scrollSnapAlign: 'center',
 });
 
 const thumbImageStyle: CSSProperties = {
   display: 'block',
-  width: 56,
-  height: 56,
+  width: 96,
+  height: 96,
   objectFit: 'cover',
 };
 
@@ -1537,23 +1667,48 @@ const inputStyle = (theme: string | null): CSSProperties => ({
   transition: 'border-color 140ms ease-out, box-shadow 140ms ease-out',
 });
 
+// Tier-3 #9: the prompt textarea. Same focus ring as the legacy input
+// (shared `gfm-input` className), plus row-2 default + max-height cap +
+// no manual resize handle. `field-sizing: content` is the CSS-native
+// auto-grow path; the JS effect inside PromptTextarea is the fallback.
+const textareaStyle = (theme: string | null): CSSProperties => ({
+  ...inputStyle(theme),
+  // `field-sizing` is honored by modern Chromium + Safari TP — browsers
+  // that don't recognize it ignore it and the JS effect kicks in. Cast
+  // because React's CSSProperties doesn't model it yet.
+  ...({ fieldSizing: 'content' } as CSSProperties),
+  resize: 'none',
+  minHeight: 56,
+  maxHeight: MAX_PROMPT_HEIGHT,
+  overflowY: 'auto',
+  fontFamily: 'inherit',
+  lineHeight: 1.4,
+});
+
+// Tier-3 #5: brighter, bolder primary CTA. Brand glow + larger pad +
+// font-weight bump. Hover behavior (translate, shadow grow) lives in
+// the CSS stylesheet since :hover can't be inlined.
 const primaryButtonStyle = (busy: boolean): CSSProperties => ({
   display: 'inline-flex',
   alignItems: 'center',
   justifyContent: 'center',
   gap: 8,
-  padding: '10px 14px',
-  borderRadius: 6,
-  background: BRAND,
+  padding: '12px 16px',
+  borderRadius: 8,
+  background: CTA,
   color: '#ffffff',
   fontSize: 14,
-  fontWeight: 600,
+  fontWeight: 700,
   border: 'none',
   cursor: busy ? 'progress' : 'pointer',
   // box-shadow + transform on hover handled in CSS. Keep transition on
   // inline style so the easing applies even when CSS isn't loaded yet.
-  transition: 'background-color 140ms ease-out, transform 140ms ease-out, box-shadow 140ms ease-out, opacity 140ms ease-out',
+  transition:
+    'background-color 140ms ease-out, transform 140ms ease-out, box-shadow 140ms ease-out, opacity 140ms ease-out',
   opacity: busy ? 0.85 : 1,
+  // Base glow — the hover state grows it via CSS. Use the light-theme
+  // value as the default; `data-theme="dark"` CSS rule overrides.
+  boxShadow: CTA_GLOW_LIGHT,
 });
 
 const linkButtonStyle = (): CSSProperties => ({
@@ -1610,9 +1765,20 @@ const resultActionsRowStyle: CSSProperties = {
   marginTop: 4,
 };
 
+// Tier-3 #7, #8: 8px corner radius (matches the carousel thumbs) + a
+// height cap so multi-megapixel results don't blow out the iframe.
+// `object-fit: contain` is implicit (not set) since the image is
+// constrained on both axes; the natural aspect ratio is preserved.
 const imageStyle = (theme: string | null): CSSProperties => ({
   maxWidth: '100%',
-  borderRadius: 6,
+  // Tier-3 #8: hard cap on rendered height. 480px keeps the result
+  // visible without overflowing the iframe past the manifest's 1600px
+  // ceiling when Advanced is also open.
+  maxHeight: 480,
+  width: '100%',
+  height: 'auto',
+  objectFit: 'contain',
+  borderRadius: 8,
   display: 'block',
   marginBottom: 8,
   boxShadow:
@@ -1623,35 +1789,24 @@ const imageStyle = (theme: string | null): CSSProperties => ({
 
 const advancedWrapperStyle = (theme: string | null): CSSProperties => ({
   border: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
-  borderRadius: 6,
+  borderRadius: 8,
   background: theme === 'dark' ? '#141517' : '#f8f9fa',
   overflow: 'hidden',
 });
 
-const advancedToggleStyle = (theme: string | null): CSSProperties => ({
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  width: '100%',
-  padding: '8px 12px',
-  background: 'transparent',
-  border: 'none',
-  color: theme === 'dark' ? '#C1C2C5' : '#222222',
-  fontSize: 13,
-  fontWeight: 500,
-  cursor: 'pointer',
-  textAlign: 'left',
-  transition: 'background-color 140ms ease-out',
-});
-
 // Smooth max-height collapse. 600px is a generous cap — the body is
 // always shorter in practice. height: auto can't be transitioned, so the
-// cap is the trade-off cost.
+// cap is the trade-off cost. Tier-3: the section no longer has an
+// inline toggle row; the wrapper itself collapses to 0 when closed.
 const advancedCollapseStyle = (open: boolean): CSSProperties => ({
   maxHeight: open ? 600 : 0,
   opacity: open ? 1 : 0,
   overflow: 'hidden',
   transition: 'max-height 200ms ease-out, opacity 160ms ease-out',
+  // Tier-3 #8: keep the collapsed section from taking ANY vertical
+  // space (including the parent's flex gap). margin-bottom 0 when
+  // closed; otherwise let the parent gap apply normally.
+  marginBottom: open ? 0 : -8,
 });
 
 const advancedBodyStyle = (theme: string | null): CSSProperties => ({
@@ -1731,15 +1886,27 @@ const STYLESHEET_CSS = `
 .gfm-fade-in { animation: gfm-fade-in 240ms ease-out both; }
 .gfm-fade-in img { animation: gfm-fade-in 280ms ease-out both; }
 
-/* Primary CTA — lift on hover, sink on press, brand-darken bg. */
+/* Tier-3 #5: brighter brand CTA with a glow shadow. Hover grows the
+   glow + lifts; active sinks, no translate. Glow intensity differs per
+   theme so the button doesn't bleed light into a dark surface. */
 .gfm-primary:not(:disabled):hover {
-  background-color: ${BRAND_HOVER};
+  background-color: ${CTA_HOVER};
   transform: translateY(-1px);
-  box-shadow: 0 2px 8px rgba(25, 113, 194, 0.28);
+  box-shadow: ${CTA_GLOW_LIGHT_HOVER};
+}
+[data-theme="dark"] .gfm-primary:not(:disabled) {
+  box-shadow: ${CTA_GLOW_DARK};
+}
+[data-theme="dark"] .gfm-primary:not(:disabled):hover {
+  box-shadow: ${CTA_GLOW_DARK_HOVER};
 }
 .gfm-primary:not(:disabled):active {
+  background-color: ${CTA_ACTIVE};
   transform: translateY(0);
-  box-shadow: 0 1px 2px rgba(25, 113, 194, 0.22);
+  box-shadow: ${CTA_GLOW_LIGHT};
+}
+[data-theme="dark"] .gfm-primary:not(:disabled):active {
+  box-shadow: ${CTA_GLOW_DARK};
 }
 .gfm-primary:disabled {
   cursor: not-allowed;
@@ -1747,7 +1914,29 @@ const STYLESHEET_CSS = `
 }
 .gfm-primary:focus-visible {
   outline: none;
+  box-shadow: 0 0 0 3px ${FOCUS_RING}, ${CTA_GLOW_LIGHT};
+}
+[data-theme="dark"] .gfm-primary:focus-visible {
+  box-shadow: 0 0 0 3px ${FOCUS_RING}, ${CTA_GLOW_DARK};
+}
+
+/* Tier-3 #3: three-dots advanced toggle. Subtle hover tint so the
+   affordance reads as interactive; active state (when Advanced is
+   open) is handled inline via dotsButtonStyle so the brand color
+   doesn't depend on the stylesheet loading. */
+.gfm-dots-btn:not(:disabled):hover {
+  background-color: rgba(125, 125, 125, 0.08);
+}
+[data-theme="dark"] .gfm-dots-btn:not(:disabled):hover {
+  background-color: rgba(255, 255, 255, 0.06);
+}
+.gfm-dots-btn:focus-visible {
+  outline: none;
   box-shadow: 0 0 0 3px ${FOCUS_RING};
+}
+.gfm-dots-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 /* Carousel thumbs — gentle scale + brightness on hover. */
@@ -1817,24 +2006,24 @@ const STYLESHEET_CSS = `
   cursor: not-allowed;
 }
 
-/* Advanced toggle — subtle hover tint so the affordance reads. */
-.gfm-advanced-toggle:hover {
-  background-color: rgba(125, 125, 125, 0.06);
-}
-.gfm-advanced-toggle:focus-visible {
-  outline: none;
-  box-shadow: inset 0 0 0 2px ${FOCUS_RING};
-}
-
 @media (prefers-reduced-motion: reduce) {
   /* Respect user accessibility preference — host theme also sets this. */
   .gfm-fade-in,
   .gfm-fade-in img,
   .gfm-thumb,
   .gfm-primary,
-  .gfm-input {
+  .gfm-input,
+  .gfm-dots-btn {
     animation: none !important;
     transition: none !important;
+  }
+  /* Tier-3 #5: the primary CTA's hover transform is the loudest part
+     of the motion budget — kill the lift + the shadow growth, keep the
+     color shift since color isn't motion. */
+  .gfm-primary:not(:disabled):hover,
+  .gfm-primary:not(:disabled):active {
+    transform: none !important;
+    box-shadow: none !important;
   }
 }
 `;
