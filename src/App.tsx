@@ -544,42 +544,53 @@ export function App() {
         )}
 
         {showcaseImages.length > 0 && (
-          <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
-            <div
-              ref={carouselRef}
-              className="gfm-carousel"
-              style={carouselStyle}
-              data-testid="gfm-carousel"
-            >
-              {showcaseImages.map((img, idx) => (
-                <button
-                  key={img.id}
-                  ref={(el) => {
-                    thumbRefs.current[idx] = el;
-                  }}
-                  type="button"
-                  aria-label={`Pick preview ${idx + 1}`}
-                  aria-pressed={idx === selectedShowcaseIdx}
-                  onClick={() => setSelectedShowcaseIdx(idx)}
-                  disabled={isBusy}
-                  className="gfm-thumb"
-                  style={thumbButtonStyle(idx === selectedShowcaseIdx, theme, img)}
-                >
-                  <img src={img.url} alt="" style={thumbImageStyle} loading="lazy" />
-                </button>
-              ))}
+          <div>
+            <p id="gfm-starter-label" style={sectionLabelStyle}>
+              Select Starter
+            </p>
+            <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
+              <div
+                ref={carouselRef}
+                className="gfm-carousel"
+                style={carouselStyle}
+                data-testid="gfm-carousel"
+                aria-labelledby="gfm-starter-label"
+              >
+                {showcaseImages.map((img, idx) => (
+                  <button
+                    key={img.id}
+                    ref={(el) => {
+                      thumbRefs.current[idx] = el;
+                    }}
+                    type="button"
+                    aria-label={`Pick preview ${idx + 1}`}
+                    aria-pressed={idx === selectedShowcaseIdx}
+                    onClick={() => setSelectedShowcaseIdx(idx)}
+                    disabled={isBusy}
+                    className="gfm-thumb"
+                    style={thumbButtonStyle(idx === selectedShowcaseIdx, theme, img)}
+                  >
+                    <img src={img.url} alt="" style={thumbImageStyle} loading="lazy" />
+                  </button>
+                ))}
+              </div>
             </div>
           </div>
         )}
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-          <PromptTextarea
-            value={prompt}
-            onChange={setPrompt}
-            onSubmit={handleGenerate}
-            disabled={isBusy}
-            theme={theme}
-          />
+          <div>
+            <label htmlFor="gfm-prompt-input" style={sectionLabelStyle}>
+              Describe Image
+            </label>
+            <PromptTextarea
+              value={prompt}
+              onChange={setPrompt}
+              onSubmit={handleGenerate}
+              disabled={isBusy}
+              theme={theme}
+            />
+          </div>
 
           <AdvancedSection
             open={advancedOpen}
@@ -605,8 +616,7 @@ export function App() {
             style={primaryButtonStyle(isBusy)}
           >
             {isBusy && <Pulse />}
-            <BoltIcon />
-            <span>{labelForStatus(status, budget, estimatedCost, isRegenerate)}</span>
+            <ButtonLabel label={labelForStatus(status, budget, estimatedCost, isRegenerate)} />
           </button>
 
           {estimateError && (
@@ -632,8 +642,8 @@ export function App() {
                 className="gfm-primary"
                 style={primaryButtonStyle(false)}
               >
+                <span>Top up · {budget * 10}</span>
                 <BoltIcon />
-                <span>Top up Buzz · {budget * 10}</span>
               </button>
             </div>
           ) : (
@@ -715,6 +725,7 @@ function PromptTextarea({
   return (
     <textarea
       ref={ref}
+      id="gfm-prompt-input"
       aria-label="Prompt (optional)"
       placeholder="Describe what you want (or hit Generate to use the preview)"
       value={value}
@@ -1252,44 +1263,41 @@ function ResultsCarousel({
   );
 }
 
+/**
+ * Returns the button label split into a leading verb-phrase and a numeric
+ * cost. The button renders `{verb} · {cost} <BoltIcon />` when cost is
+ * known, or `{verb} (≤ {budget} <BoltIcon />)` as a fallback — the Buzz
+ * word is gone from the label; the bolt icon is the Buzz indicator.
+ *
+ * Status semantics: estimating | submitting | polling are busy; the rest
+ * are actionable. After the first submit on a showcase, the verb flips
+ * to "Re-generate Image" — the visible signal that the next click will
+ * randomize the seed.
+ */
+type ButtonLabelInfo = { verb: string; cost: number | null; isFallback: boolean };
 function labelForStatus(
   status: WorkflowStatus,
   budget: number,
   estimatedCost: number | null,
   isRegenerate = false
-): string {
-  // SDK status semantics:
-  //   estimating  — cost lookup in flight (busy)
-  //   confirming  — cost computed, awaiting USER click (idle; show Generate)
-  //   submitting  — submit() in flight (busy)
-  //   polling     — workflow running server-side (busy)
-  //   idle / done / error → also idle (show Generate)
-  //
-  // Tier-2 #8: keep the cost visible during submitting/polling so the user
-  // never loses sight of what they're paying for what they see. Fallback
-  // mirrors the idle shape — `(≤ N Buzz)` — when no estimate has landed.
-  // Tier-3 #11c: after the first submit on a showcase the verb flips
-  // from "Generate" to "Re-generate" — the visible signal that the
-  // next click will randomize the seed.
-  if (status === 'estimating') return 'Estimating cost…';
+): ButtonLabelInfo {
+  if (status === 'estimating') {
+    return { verb: 'Estimating cost…', cost: null, isFallback: false };
+  }
   if (status === 'submitting') {
     return estimatedCost != null
-      ? `Submitting · ${estimatedCost} Buzz`
-      : `Submitting (≤ ${budget} Buzz)`;
+      ? { verb: 'Submitting', cost: estimatedCost, isFallback: false }
+      : { verb: 'Submitting', cost: budget, isFallback: true };
   }
   if (status === 'polling') {
     return estimatedCost != null
-      ? `Generating · ${estimatedCost} Buzz`
-      : `Generating (≤ ${budget} Buzz)`;
+      ? { verb: 'Generating', cost: estimatedCost, isFallback: false }
+      : { verb: 'Generating', cost: budget, isFallback: true };
   }
-  // idle, confirming, done, error: the button is actionable. Show
-  // the actual estimated cost when we have one, fall back to the
-  // budget cap otherwise. Middle-dot separator reads cleaner than
-  // parens for the known-cost case.
-  const verb = isRegenerate ? 'Re-generate' : 'Generate';
+  const verb = isRegenerate ? 'Re-generate Image' : 'Generate Image';
   return estimatedCost != null
-    ? `${verb} · ${estimatedCost} Buzz`
-    : `${verb} (≤ ${budget} Buzz)`;
+    ? { verb, cost: estimatedCost, isFallback: false }
+    : { verb, cost: budget, isFallback: true };
 }
 
 /**
@@ -1595,6 +1603,31 @@ function BoltIcon() {
 }
 
 /**
+ * The Generate / Re-generate / Submitting / Generating button label.
+ * Renders `{verb} · {cost} ⚡` when a cost is known, or
+ * `{verb} (≤ {budget} ⚡)` as a fallback. The "Buzz" word is gone —
+ * the bolt icon IS the Buzz indicator.
+ */
+function ButtonLabel({ label }: { label: ButtonLabelInfo }) {
+  if (label.cost == null) {
+    return <span>{label.verb}</span>;
+  }
+  if (label.isFallback) {
+    return (
+      <span>
+        {label.verb} (≤ {label.cost} <BoltIcon />)
+      </span>
+    );
+  }
+  return (
+    <>
+      <span>{label.verb}{' · '}{label.cost}</span>
+      <BoltIcon />
+    </>
+  );
+}
+
+/**
  * Tier-4 Delta B: 16×16 download arrow for the per-result icon button on
  * each carousel card. currentColor again — the icon button styles the
  * color (subtle by default, brand on hover).
@@ -1850,6 +1883,20 @@ const subtleStyle: CSSProperties = {
   opacity: 0.7,
   fontSize: 13,
   margin: 0,
+};
+
+// Section label above the showcase carousel + prompt textarea. Small,
+// subtle, slightly tracked — feels like a form-field label, not a
+// heading. Used as both a `<p>` (for aria-labelledby on the carousel
+// radiogroup) and a `<label>` (for the textarea's htmlFor binding).
+const sectionLabelStyle: CSSProperties = {
+  display: 'block',
+  fontSize: 12,
+  fontWeight: 600,
+  letterSpacing: '0.02em',
+  textTransform: 'uppercase',
+  opacity: 0.65,
+  margin: '0 0 6px 0',
 };
 
 const errorTextStyle: CSSProperties = {

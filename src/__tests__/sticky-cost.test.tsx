@@ -36,7 +36,7 @@ describe('Sticky cost in primary button (delta #8)', () => {
     await renderApp(<App />);
     // Default estimate mock resolves to cost.total = 34.
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Generating · 34 Buzz/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Generating · 34/ })).toBeInTheDocument();
     });
   });
 
@@ -47,7 +47,7 @@ describe('Sticky cost in primary button (delta #8)', () => {
     });
     await renderApp(<App />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Submitting · 34 Buzz/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Submitting · 34/ })).toBeInTheDocument();
     });
   });
 
@@ -63,7 +63,7 @@ describe('Sticky cost in primary button (delta #8)', () => {
     await renderApp(<App />);
     await waitFor(() => {
       // No exact cost → fallback uses the publisher budget as the cap.
-      const btn = screen.getByRole('button', { name: /Generating \(≤ 50 Buzz\)/ });
+      const btn = screen.getByRole('button', { name: /Generating \(≤ 50 / });
       expect(btn).toBeInTheDocument();
     });
   });
@@ -79,7 +79,7 @@ describe('Sticky cost in primary button (delta #8)', () => {
     await renderApp(<App />);
     await waitFor(() => {
       expect(
-        screen.getByRole('button', { name: /Submitting \(≤ 50 Buzz\)/ })
+        screen.getByRole('button', { name: /Submitting \(≤ 50 / })
       ).toBeInTheDocument();
     });
   });

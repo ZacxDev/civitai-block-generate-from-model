@@ -41,7 +41,7 @@ describe('Re-generate semantics (Tier-3 #11)', () => {
     spies.submit.mockClear();
 
     // Initial selection is showcase #1 (default first item). Fire Generate.
-    await userEvent.click(screen.getByRole('button', { name: /Generate · 34 Buzz/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Generate Image · 34/ }));
 
     expect(spies.submit).toHaveBeenCalledTimes(1);
     const params = spies.submit.mock.calls[0]![0] as { params: { seed?: number } };
@@ -56,13 +56,13 @@ describe('Re-generate semantics (Tier-3 #11)', () => {
     spies.submit.mockClear();
 
     // Click Generate twice on the same showcase without switching.
-    await userEvent.click(screen.getByRole('button', { name: /Generate · 34 Buzz/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Generate Image · 34/ }));
     // After the first submit, the button copy flips to Re-generate. Wait
     // for that state to settle before the second click.
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Re-generate/ })).toBeInTheDocument();
     });
-    await userEvent.click(screen.getByRole('button', { name: /Re-generate · 34 Buzz/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Re-generate Image · 34/ }));
 
     expect(spies.submit).toHaveBeenCalledTimes(2);
     const firstParams = spies.submit.mock.calls[0]![0] as { params: { seed?: number } };
@@ -78,15 +78,15 @@ describe('Re-generate semantics (Tier-3 #11)', () => {
 
     // Generate on showcase #1, then SWITCH to showcase #2 (which has
     // its own seed=67890), then Generate again.
-    await userEvent.click(screen.getByRole('button', { name: /Generate · 34 Buzz/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Generate Image · 34/ }));
     await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
     await waitFor(() => {
       // After switching showcases the verb should be back to Generate
       // (the counter reset means the next click is a "first" click for
       // showcase #2).
-      expect(screen.getByRole('button', { name: /Generate · 34 Buzz/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Generate Image · 34/ })).toBeInTheDocument();
     });
-    await userEvent.click(screen.getByRole('button', { name: /Generate · 34 Buzz/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Generate Image · 34/ }));
 
     expect(spies.submit).toHaveBeenCalledTimes(2);
     const firstParams = spies.submit.mock.calls[0]![0] as { params: { seed?: number } };
@@ -98,17 +98,17 @@ describe('Re-generate semantics (Tier-3 #11)', () => {
   it('button label flips from "Generate" to "Re-generate" after the first submit on the same showcase', async () => {
     await renderApp(<App />);
 
-    // Before any submit: idle "Generate · 34 Buzz".
+    // Before any submit: idle "Generate Image · 34".
     expect(
-      screen.getByRole('button', { name: /Generate · 34 Buzz/ })
+      screen.getByRole('button', { name: /Generate Image · 34/ })
     ).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: /Generate · 34 Buzz/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Generate Image · 34/ }));
 
     // After: same showcase + idle state → "Re-generate".
     await waitFor(() => {
       expect(
-        screen.getByRole('button', { name: /Re-generate · 34 Buzz/ })
+        screen.getByRole('button', { name: /Re-generate Image · 34/ })
       ).toBeInTheDocument();
     });
   });
@@ -116,7 +116,7 @@ describe('Re-generate semantics (Tier-3 #11)', () => {
   it('switching showcases resets the verb back to "Generate"', async () => {
     await renderApp(<App />);
 
-    await userEvent.click(screen.getByRole('button', { name: /Generate · 34 Buzz/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Generate Image · 34/ }));
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Re-generate/ })).toBeInTheDocument();
     });
@@ -125,7 +125,7 @@ describe('Re-generate semantics (Tier-3 #11)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Pick preview 3' }));
     await waitFor(() => {
       expect(
-        screen.getByRole('button', { name: /Generate · 34 Buzz/ })
+        screen.getByRole('button', { name: /Generate Image · 34/ })
       ).toBeInTheDocument();
     });
     expect(screen.queryByRole('button', { name: /Re-generate/ })).not.toBeInTheDocument();

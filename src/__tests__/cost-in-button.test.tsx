@@ -3,7 +3,7 @@
  * button (no standalone cost line) and the polling status line removed.
  *
  *   #1: "Estimated cost: N Buzz (budget: M)" line is gone; the button
- *        text is the single source of truth — `Generate · 34 Buzz`.
+ *        text is the single source of truth — `Generate Image · 34`.
  *   #2: While polling, the button label flips to "Generating…" with a
  *        pulse — there is no separate "<p>Queued…</p>" line.
  */
@@ -31,14 +31,14 @@ describe('Cost inside the Generate button (delta #1)', () => {
     // The default mock estimate resolves to cost.total = 34.
     await waitFor(() => {
       const btn = screen.getByRole('button', { name: /Generate/ });
-      expect(btn).toHaveTextContent(/Generate · 34 Buzz/);
+      expect(btn).toHaveTextContent(/Generate Image · 34/);
     });
   });
 
   it('does NOT render a standalone "Estimated cost" / "budget:" line', async () => {
     await renderApp(<App />);
     await waitFor(() => {
-      expect(screen.getByRole('button', { name: /Generate · 34 Buzz/ })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Generate Image · 34/ })).toBeInTheDocument();
     });
     // The old paragraph form lived OUTSIDE the button and read like
     // "Estimated cost: 34 Buzz (budget: 50)". It is gone.
@@ -55,9 +55,11 @@ describe('Cost inside the Generate button (delta #1)', () => {
     getMockSpies().estimate.mockRejectedValue(new Error('boom'));
     await renderApp(<App />);
     await waitFor(() => {
-      // No exact cost → fall back to budget cap.
-      const btn = screen.getByRole('button', { name: /Generate/ });
-      expect(btn.textContent ?? '').toMatch(/Generate \(.+ Buzz\)/);
+      // No exact cost → fall back to budget cap. "Buzz" word is now
+      // the trailing BoltIcon SVG, not text, so just match the
+      // verb-phrase + parenthesized number.
+      const btn = screen.getByRole('button', { name: /Generate Image/ });
+      expect(btn.textContent ?? '').toMatch(/Generate Image \(≤ \d+/);
     });
   });
 
@@ -77,7 +79,7 @@ describe('Cost inside the Generate button (delta #1)', () => {
     // The bolt visually ties the action to the Buzz currency. JSDOM
     // can't verify colors but the SVG + the path data are stable.
     await waitFor(() => {
-      const btn = screen.getByRole('button', { name: /Generate · 34 Buzz/ });
+      const btn = screen.getByRole('button', { name: /Generate Image · 34/ });
       const svg = btn.querySelector('svg');
       expect(svg).not.toBeNull();
       const path = svg!.querySelector('path');
@@ -90,7 +92,7 @@ describe('Cost inside the Generate button (delta #1)', () => {
   it('Generate button has the gfm-primary class so it picks up the amber CTA stylesheet rules', async () => {
     await renderApp(<App />);
     await waitFor(() => {
-      const btn = screen.getByRole('button', { name: /Generate · 34 Buzz/ });
+      const btn = screen.getByRole('button', { name: /Generate Image · 34/ });
       expect(btn).toHaveClass('gfm-primary');
       // Inline style base color — the amber (Mantine yellow[6]).
       expect(btn.style.background.toLowerCase()).toMatch(/#fab005|rgb\(250, 176, 5\)/);
@@ -109,14 +111,14 @@ describe('No standalone polling status line (delta #2)', () => {
     });
     await renderApp(<App />);
     // Button picks up the busy label with the sticky cost.
-    const btn = screen.getByRole('button', { name: /Generating · \d+ Buzz/ });
+    const btn = screen.getByRole('button', { name: /Generating · \d+/ });
     expect(btn).toBeInTheDocument();
-    expect(btn.textContent ?? '').toMatch(/Generating · \d+ Buzz/);
+    expect(btn.textContent ?? '').toMatch(/Generating · \d+/);
     // There is no <p>Queued…</p> / <p>Generating…</p> sibling. To verify,
     // make sure the ONLY node containing the "Generating · N Buzz" form
     // is inside the button. (Note: "Generating with:" in the Advanced
     // section is unrelated copy and uses a different shape.)
-    const generatingNodes = screen.getAllByText(/Generating · \d+ Buzz/);
+    const generatingNodes = screen.getAllByText(/Generating · \d+/);
     expect(generatingNodes).toHaveLength(1);
     expect(btn.contains(generatingNodes[0]!)).toBe(true);
   });

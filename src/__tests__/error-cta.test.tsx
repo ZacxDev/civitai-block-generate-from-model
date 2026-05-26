@@ -2,7 +2,7 @@
  * Covers Tier-2 delta #10 — compact error box with a prominent Top-Up
  * CTA for the insufficient-buzz case.
  *
- *   Insufficient buzz  → quiet error copy, big primary "Top up Buzz · N"
+ *   Insufficient buzz  → quiet error copy, big primary "Top up · N"
  *                        button using the same primaryButtonStyle as Generate
  *   Any other error    → unchanged: error text inside the alert box, no CTA
  */
@@ -37,7 +37,7 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     await renderApp(<App />);
 
     // The CTA labels itself with the suggested top-up amount (budget × 10).
-    const topUp = screen.getByRole('button', { name: /Top up Buzz · 500/ });
+    const topUp = screen.getByRole('button', { name: /Top up · 500/ });
     expect(topUp).toBeInTheDocument();
     // Visual weight: uses the same primary button class as Generate. The
     // class is the load-bearing assertion (it pulls in the hover/active
@@ -60,7 +60,7 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     // The bolt anchors the Top-Up CTA visually to the Buzz currency. JSDOM
     // doesn't render colors, but the SVG element + the role assertion are
     // enough to verify the icon is present.
-    const topUp = screen.getByRole('button', { name: /Top up Buzz · 500/ });
+    const topUp = screen.getByRole('button', { name: /Top up · 500/ });
     const svg = topUp.querySelector('svg');
     expect(svg).not.toBeNull();
     // Sanity: the path data matches the canonical Tabler Bolt shape so a
@@ -106,7 +106,7 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     const spies = getMockSpies();
     spies.openPurchaseModal.mockClear();
 
-    await userEvent.click(screen.getByRole('button', { name: /Top up Buzz · 250/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Top up · 250/ }));
 
     expect(spies.openPurchaseModal).toHaveBeenCalledTimes(1);
     expect(spies.openPurchaseModal).toHaveBeenCalledWith(250);
@@ -123,6 +123,6 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
       } as never,
     });
     await renderApp(<App />);
-    expect(screen.getByRole('button', { name: /Top up Buzz · 100/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Top up · 100/ })).toBeInTheDocument();
   });
 });
