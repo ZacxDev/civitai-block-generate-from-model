@@ -502,7 +502,7 @@ export function App() {
                 onClick={() => setSelectedShowcaseIdx(idx)}
                 disabled={isBusy}
                 className="gfm-thumb"
-                style={thumbButtonStyle(idx === selectedShowcaseIdx, theme)}
+                style={thumbButtonStyle(idx === selectedShowcaseIdx, theme, img)}
               >
                 <img src={img.url} alt="" style={thumbImageStyle} loading="lazy" />
               </button>
@@ -1621,26 +1621,41 @@ const carouselStyle: CSSProperties = {
 
 // Tier-3 #6, #7: bigger thumb (was 56×56) + slightly larger radius. The
 // showcase carousel is the most-clicked surface, so paying vertical
-// space for it is worth it.
-const thumbButtonStyle = (selected: boolean, theme: string | null): CSSProperties => ({
-  padding: 0,
-  border: `2px solid ${selected ? BRAND : theme === 'dark' ? '#373A40' : '#dee2e6'}`,
-  borderRadius: 8,
-  background: 'transparent',
-  cursor: 'pointer',
-  overflow: 'hidden',
-  transition: 'border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out',
-  boxShadow: selected ? `0 0 0 3px ${FOCUS_RING}` : 'none',
-  // Don't let flex squish thumbs when the row overflows — they should
-  // keep their 96×96 footprint and the parent scrolls instead.
-  flex: '0 0 auto',
-  scrollSnapAlign: 'center',
-});
+// space for it is worth it. Thumbs share a fixed height (THUMB_H) so
+// the row aligns; width varies with the source aspect ratio so each
+// thumb shows the image in its true proportions — no cropping. The
+// button gets `aspect-ratio` from the showcase data so the row reserves
+// the correct width BEFORE the image loads (prevents layout shift).
+const THUMB_H = 96;
+const thumbButtonStyle = (
+  selected: boolean,
+  theme: string | null,
+  img: ShowcaseImage
+): CSSProperties => {
+  const w = img.width && img.width > 0 ? img.width : 1;
+  const h = img.height && img.height > 0 ? img.height : 1;
+  return {
+    padding: 0,
+    border: `2px solid ${selected ? BRAND : theme === 'dark' ? '#373A40' : '#dee2e6'}`,
+    borderRadius: 8,
+    background: 'transparent',
+    cursor: 'pointer',
+    overflow: 'hidden',
+    transition: 'border-color 160ms ease-out, transform 160ms ease-out, box-shadow 160ms ease-out',
+    boxShadow: selected ? `0 0 0 3px ${FOCUS_RING}` : 'none',
+    flex: '0 0 auto',
+    scrollSnapAlign: 'center',
+    height: THUMB_H,
+    // Reserve width based on the source aspect ratio so the row
+    // doesn't reflow when images finish loading.
+    aspectRatio: `${w} / ${h}`,
+  };
+};
 
 const thumbImageStyle: CSSProperties = {
   display: 'block',
-  width: 96,
-  height: 96,
+  height: '100%',
+  width: '100%',
   objectFit: 'cover',
 };
 

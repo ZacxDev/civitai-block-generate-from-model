@@ -36,13 +36,19 @@ describe('Carousel scroll + compact thumbs (delta #9)', () => {
     expect(carousel.style.flexWrap).toBe('nowrap');
   });
 
-  it('thumbnails render at 96×96 (Tier-3 #6: the showcase is the most-clicked surface, so paying space for it is worth it)', async () => {
+  it('thumbnails preserve source aspect ratio: button height 96px + aspect-ratio from img dims, image fills 100%', async () => {
     await renderApp(<App />);
     const firstThumb = screen.getByRole('button', { name: 'Pick preview 1' });
+    // Button reserves the right width upfront via aspect-ratio so the
+    // row doesn't reflow when the image loads.
+    expect(firstThumb.style.height).toBe('96px');
+    expect(firstThumb.style.aspectRatio).toMatch(/^\d+\s*\/\s*\d+$/);
+    // Image fills the button — `object-fit: cover` keeps the source
+    // proportions; the button's aspect-ratio means there's no cropping.
     const innerImg = firstThumb.querySelector('img');
     expect(innerImg).not.toBeNull();
-    expect((innerImg as HTMLImageElement).style.width).toBe('96px');
-    expect((innerImg as HTMLImageElement).style.height).toBe('96px');
+    expect((innerImg as HTMLImageElement).style.height).toBe('100%');
+    expect((innerImg as HTMLImageElement).style.width).toBe('100%');
   });
 
   it('thumbs do not flex-shrink (flex: 0 0 auto) so the row stays a fixed pitch', async () => {
