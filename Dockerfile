@@ -6,7 +6,6 @@ WORKDIR /app
 
 # Install deps with package-lock for determinism
 COPY package.json package-lock.json* ./
-COPY vendor/ ./vendor/
 RUN npm ci || npm install
 
 # Build

@@ -27,8 +27,8 @@
     "docker:build": "docker build -t ghcr.io/zacxdev/civitai-block-generate-from-model:latest ."
   },
   "dependencies": {
-    "@civitai/app-sdk": "file:./vendor/civitai-app-sdk-0.5.0.tgz",
-    "@civitai/blocks-react": "file:./vendor/civitai-blocks-react-0.3.0.tgz",
+    "@civitai/app-sdk": "^0.6.0",
+    "@civitai/blocks-react": "^0.4.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
