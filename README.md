@@ -101,20 +101,16 @@ Publisher-configurable settings:
 | `default_prompt_suffix` | `""` | Appended to user prompt (style hints) |
 | `show_advanced` | `false` | Reveal seed/sampler/steps controls |
 
-## SDK install — dogfooding note
-
-The published `@civitai/app-sdk` and `@civitai/blocks-react` packages don't exist on npm yet — they live in [civitai/civitai-app-starters#11](https://github.com/civitai/civitai-app-starters/pull/11). For the hackathon, this repo ships `npm pack` tarballs under `vendor/` and references them via `file:` deps in `package.json`.
-
-**Once PR #11 lands and the packages publish to npm, swap to:**
+## SDK install
 
 ```json
 "dependencies": {
-  "@civitai/app-sdk": "^0.3.0",
-  "@civitai/blocks-react": "^0.1.0"
+  "@civitai/app-sdk": "^0.6.0",
+  "@civitai/blocks-react": "^0.4.0"
 }
 ```
 
-— then `rm -rf vendor/`. That's the true external-dev install path.
+Published from [civitai/civitai-app-starters](https://github.com/civitai/civitai-app-starters).
 
 ## License
 
