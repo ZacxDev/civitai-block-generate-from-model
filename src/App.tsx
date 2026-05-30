@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import type { CSSProperties } from 'react';
+import type { CSSProperties, RefObject } from 'react';
 
 import {
   useBlockContext,
@@ -99,6 +99,16 @@ export function App() {
   // doesn't implement scrollIntoView — see effect below for the guard.
   const carouselRef = useRef<HTMLDivElement>(null);
   const thumbRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  // Results-carousel scroll container ref so a fresh Generate click can
+  // pull the newest (leftmost) card into view, even if the user had
+  // scrolled right to compare older results.
+  const resultsCarouselRef = useRef<HTMLDivElement>(null);
+  // Debug / test affordance: when checked, the next Generate click
+  // short-circuits before submit() and triggers the in-block "Not
+  // enough Buzz" top-up CTA so the full top-up flow can be exercised
+  // without actually exhausting a balance. Cleared by toggling off.
+  const [forceZeroBuzz, setForceZeroBuzz] = useState(false);
+  const [simulatedInsufficient, setSimulatedInsufficient] = useState(false);
   // Estimated cost (yellow buzz) for the current params. Pulled from
   // estimate() snapshot, refreshed on mount + when the model identity
   // (checkpoint or selected showcase) changes.
@@ -317,6 +327,28 @@ export function App() {
     selectedShowcaseIdx,
   ]);
 
+  // Pull the results carousel back to its leftmost (newest) position
+  // every time a generation starts, so a click on Generate always
+  // reveals where the new image will land — the shimmer LoadingCard
+  // sits at the front, but the user may have scrolled right to inspect
+  // older cards. Effect (vs in-handler) handles cold start: the
+  // carousel only mounts after isInFlight flips true, and effects run
+  // after the commit so the ref is populated by then.
+  useEffect(() => {
+    if (status !== 'submitting' && status !== 'polling') return;
+    const el = resultsCarouselRef.current;
+    if (!el) return;
+    try {
+      el.scrollTo({ left: 0, behavior: 'smooth' });
+    } catch {
+      try {
+        el.scrollLeft = 0;
+      } catch {
+        // JSDOM / older browsers — affordance is non-load-bearing.
+      }
+    }
+  }, [status]);
+
   // Tier-4 Delta B: append every fresh succeeded snapshot to pastResults.
   // Guard with a workflowId Set so re-renders + StrictMode double-effects
   // don't duplicate. Newest goes to the front; FIFO eviction keeps the
@@ -450,6 +482,14 @@ export function App() {
     selectedShowcaseIdx != null && lastSubmittedShowcaseIdx === selectedShowcaseIdx;
 
 const handleGenerate = async () => {
+    // Debug short-circuit: when "Simulate 0 Buzz" is checked, skip the
+    // real submit and synthesize the insufficient-Buzz state. The
+    // existing error block renders the top-up CTA, which still opens
+    // the real purchase modal — full top-up flow exercised, no spend.
+    if (forceZeroBuzz) {
+      setSimulatedInsufficient(true);
+      return;
+    }
     try {
       // Either the user pressed 🎲 (manual), or this is a re-gen on the
       // same showcase (auto). Both paths drop the seed for this submit.
@@ -576,6 +616,22 @@ const handleGenerate = async () => {
             onChangeCheckpoint={handleChangeCheckpoint}
           />
 
+          <label style={debugRowStyle(theme)}>
+            <input
+              type="checkbox"
+              checked={forceZeroBuzz}
+              onChange={(e) => {
+                setForceZeroBuzz(e.target.checked);
+                // Toggling off clears the simulated state so the next
+                // real Generate click works normally.
+                if (!e.target.checked) setSimulatedInsufficient(false);
+              }}
+              disabled={isBusy}
+              aria-label="Simulate zero Buzz balance"
+            />
+            <span>Simulate 0 Buzz (test top-up)</span>
+          </label>
+
           <button
             type="button"
             onClick={handleGenerate}
@@ -594,8 +650,8 @@ const handleGenerate = async () => {
           )}
         </div>
 
-        {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && (
-          isInsufficient ? (
+        {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled' || simulatedInsufficient) && (
+          (isInsufficient || simulatedInsufficient) ? (
             // Tier-2 #10: for the insufficient-buzz path the Top-Up CTA is
             // the obvious next action — make it the primary button, demote
             // the error message to supporting copy. Visual weight matches
@@ -630,6 +686,7 @@ const handleGenerate = async () => {
             the next result will land. */}
         {(isInFlight || pastResults.length > 0) && (
           <ResultsCarousel
+            scrollRef={resultsCarouselRef}
             results={pastResults}
             inFlight={
               isInFlight
@@ -1152,12 +1209,14 @@ function truncate(s: string, n: number): string {
  * Try Again) so mid-flight clicks can't fire stale submits.
  */
 function ResultsCarousel({
+  scrollRef,
   results,
   inFlight,
   theme,
   modelName,
   isBusy,
 }: {
+  scrollRef: RefObject<HTMLDivElement | null>;
   results: BlockWorkflowSnapshot[];
   inFlight: { cost: number | null; aspectRatio: string } | null;
   theme: string | null;
@@ -1168,6 +1227,7 @@ function ResultsCarousel({
     <div className="gfm-fade-in" style={{ marginTop: 8 }}>
       <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
         <div
+          ref={scrollRef}
           className="gfm-carousel gfm-results-carousel"
           style={resultsCarouselStyle}
           data-testid="gfm-results-carousel"
@@ -2175,6 +2235,23 @@ const labelStyle: CSSProperties = {
   fontWeight: 500,
   opacity: 0.85,
 };
+
+// Subtle dashed-border debug row for the "Simulate 0 Buzz" toggle.
+// Visually distinct from real product affordances so it reads as a
+// dev/test thing, not a feature a publisher would ship.
+const debugRowStyle = (theme: string | null): CSSProperties => ({
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  padding: '6px 10px',
+  borderRadius: 6,
+  border: `1px dashed ${theme === 'dark' ? '#373A40' : '#dee2e6'}`,
+  background: 'transparent',
+  opacity: 0.75,
+  fontSize: 12,
+  cursor: 'pointer',
+  userSelect: 'none',
+});
 
 const diceButtonStyle = (active: boolean, theme: string | null): CSSProperties => ({
   padding: '6px 10px',
