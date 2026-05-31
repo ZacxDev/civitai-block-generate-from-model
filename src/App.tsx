@@ -115,6 +115,9 @@ export function App() {
   const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
   const estimateInFlightRef = useRef(0);
+  // Skip the override-driven debounced re-estimate on first mount — the
+  // immediate identity effect already covers the initial cost quote.
+  const overrideEstimateMountedRef = useRef(false);
 
   // Tier-4 Delta B: accumulate every succeeded generation into a small
   // FIFO history so re-generate stops being destructive — the user sees
@@ -127,6 +130,13 @@ export function App() {
   // and re-renders don't push the same snapshot twice.
   const [pastResults, setPastResults] = useState<BlockWorkflowSnapshot[]>([]);
   const capturedWorkflowIdsRef = useRef<Set<string>>(new Set());
+
+  // Lightbox: clicking a result image opens it full-size in an in-block
+  // overlay. Can't defer to a host "open image viewer" message (none
+  // exists in the SDK) or window.open (manifest sandbox is
+  // allow-scripts allow-forms — no popups), so the viewer lives inside
+  // the iframe. `null` = closed.
+  const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
   // useBuzzWorkflow().submit() returns the initial snapshot but the hook
   // doesn't auto-poll — it's the caller's job to drive poll(workflowId)
@@ -281,18 +291,28 @@ export function App() {
   // next generation looks like; it shouldn't erase what they've already
   // made. Only path that clears pastResults today is component unmount.
 
-  // Auto-estimate on mount + whenever the model identity changes
-  // (checkpoint swap, or showcase pick — both change cost via the
-  // resolved params). NOT debounced on prompt edits: prompt length
-  // doesn't move cost enough to be worth a round-trip per keystroke.
-  useEffect(() => {
+  // Fire a single cost estimate against the current resolved params.
+  // Recreated every render so it always closes over the latest prompt /
+  // showcase / overrides; the effects below decide WHEN to call it.
+  //
+  // Skipped when `forceZeroBuzz` is checked — we're pretending to have
+  // no buzz, so there's no point asking the orchestrator for a cost
+  // estimate (and the user expects the topup CTA to show directly,
+  // not a separate "Couldn't estimate cost: …" error from the bridge).
+  const runEstimateNow = () => {
+    if (forceZeroBuzz) return;
     const modelId = modelCtxRead.modelId;
     const modelVersionId = modelCtxRead.modelVersionId;
     if (!modelId || !modelVersionId) return;
     if (!effectiveCheckpointVersionIdForEstimate) return;
     // Race guard — if a faster query lands while a slower one is in
-    // flight, only the latest result wins.
+    // flight (or a debounced one fires late), only the latest result wins.
     const myId = ++estimateInFlightRef.current;
+    // Diagnostic: log estimate kick-off so a future ESTIMATE_WORKFLOW
+    // timeout can be correlated with the iframe → host bridge state
+    // (parentOrigin, BLOCK_INIT timing, etc.) in the browser console.
+    // eslint-disable-next-line no-console
+    console.debug('[gfm] estimate kickoff', { modelId, modelVersionId, attempt: myId });
     estimate({
       kind: 'textToImage',
       modelId,
@@ -300,32 +320,56 @@ export function App() {
       // NOTE: estimate doesn't carry randomizeSeedOnce — that's a
       // one-shot for submit only. The estimate uses the showcase's seed
       // so cost-preview stays stable while the user is reviewing.
-      // Overrides DO flow through here, but the auto-estimate effect
-      // intentionally doesn't re-run on overrides changes (see deps
-      // below) — re-estimating on every keystroke of width/height would
-      // be noisy. The shown cost can lag user edits; that's accepted.
+      // Overrides flow through buildSubmitParams so the quoted cost
+      // matches the charged cost (same builder feeds submit()).
       params: buildSubmitParams(prompt, '' /* suffix */, selectedShowcase, overrides, false),
     })
       .then((snap) => {
         if (myId !== estimateInFlightRef.current) return;
         const cost = snap.cost?.total;
+        // eslint-disable-next-line no-console
+        console.debug('[gfm] estimate resolved', { attempt: myId, cost });
         setEstimatedCost(typeof cost === 'number' ? cost : null);
         setEstimateError(null);
       })
       .catch((err) => {
         if (myId !== estimateInFlightRef.current) return;
+        // eslint-disable-next-line no-console
+        console.warn('[gfm] estimate rejected', { attempt: myId, err: String(err) });
         setEstimateError(err instanceof Error ? err.message : 'estimate failed');
         setEstimatedCost(null);
       });
-    // Intentionally narrow deps: re-estimate on checkpoint OR showcase
-    // change, NOT on prompt edits.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [
+  };
+
+  // Immediate estimate on mount + identity changes (checkpoint swap /
+  // showcase pick / forceZeroBuzz toggle). Kept synchronous so the cost
+  // quote shows on the button without a debounce delay.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(runEstimateNow, [
     modelCtxRead.modelId,
     modelCtxRead.modelVersionId,
     effectiveCheckpointVersionIdForEstimate,
     selectedShowcaseIdx,
+    forceZeroBuzz,
   ]);
+
+  // Debounced re-estimate on cost-bearing advanced overrides (width,
+  // height, steps — these scale the orchestrator price). 400ms so
+  // dragging a dimension or holding a key in the steps field coalesces
+  // into one round-trip instead of one per keystroke. Reading the
+  // individual fields (not the `overrides` object) keeps no-cost edits
+  // (negativePrompt, sampler, cfg, seed, clipSkip) from re-quoting.
+  // Skips the first mount — the identity effect above already quoted.
+  useEffect(() => {
+    if (!overrideEstimateMountedRef.current) {
+      overrideEstimateMountedRef.current = true;
+      return;
+    }
+    if (forceZeroBuzz) return;
+    const timer = setTimeout(runEstimateNow, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [overrides.width, overrides.height, overrides.steps]);
 
   // Pull the results carousel back to its leftmost (newest) position
   // every time a generation starts, so a click on Generate always
@@ -623,8 +667,13 @@ const handleGenerate = async () => {
               onChange={(e) => {
                 setForceZeroBuzz(e.target.checked);
                 // Toggling off clears the simulated state so the next
-                // real Generate click works normally.
-                if (!e.target.checked) setSimulatedInsufficient(false);
+                // real Generate click works normally. Also clears any
+                // stale estimate error from a pre-toggle attempt — the
+                // auto-estimate effect will refresh on the next mount.
+                if (!e.target.checked) {
+                  setSimulatedInsufficient(false);
+                  setEstimateError(null);
+                }
               }}
               disabled={isBusy}
               aria-label="Simulate zero Buzz balance"
@@ -632,51 +681,66 @@ const handleGenerate = async () => {
             <span>Simulate 0 Buzz (test top-up)</span>
           </label>
 
-          <button
-            type="button"
-            onClick={handleGenerate}
-            disabled={isBusy}
-            className="gfm-primary"
-            style={primaryButtonStyle(isBusy)}
-          >
-            {isBusy && <Pulse />}
-            <ButtonLabel label={labelForStatus(status, budget, estimatedCost, isRegenerate)} />
-          </button>
+          {/* Proactive top-up surface: when forceZeroBuzz is checked OR a
+              previous estimate/submit hit an insufficient-buzz error, swap
+              the Generate button for the Top-Up CTA so the user never has
+              to click a doomed Generate to discover they're short. The
+              error block below renders the EXPLANATORY copy under it. */}
+          {(forceZeroBuzz || isInsufficient || simulatedInsufficient) ? (
+            <button
+              type="button"
+              onClick={() => openPurchaseModal(budget * 10)}
+              className="gfm-primary"
+              style={primaryButtonStyle(false)}
+            >
+              <span>Top up · {budget * 10}</span>
+              <BoltIcon />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleGenerate}
+              disabled={isBusy}
+              className="gfm-primary"
+              style={primaryButtonStyle(isBusy)}
+            >
+              {isBusy && <Pulse />}
+              <ButtonLabel label={labelForStatus(status, budget, estimatedCost, isRegenerate)} />
+            </button>
+          )}
 
-          {estimateError && (
+          {/* Hide the stale "Couldn't estimate cost: …" line when
+              forceZeroBuzz is on — auto-estimate is skipped in that mode
+              so any old error message would just confuse the user. */}
+          {estimateError && !forceZeroBuzz && (
             <p style={{ ...subtleStyle, fontSize: 12 }}>
               Couldn't estimate cost: {estimateError}
             </p>
           )}
         </div>
 
-        {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled' || simulatedInsufficient) && (
-          (isInsufficient || simulatedInsufficient) ? (
-            // Tier-2 #10: for the insufficient-buzz path the Top-Up CTA is
-            // the obvious next action — make it the primary button, demote
-            // the error message to supporting copy. Visual weight matches
-            // the Generate button so the user reads "do this instead."
-            // Tier-4 Delta C: amber/gold to match the Buzz-spend semantics
-            // of the Generate button (top-up is also a Buzz transaction).
-            <div style={insufficientBoxStyle(theme)} role="alert">
-              <p style={insufficientCopyStyle(theme)}>Not enough Buzz for this generation.</p>
-              <button
-                type="button"
-                onClick={() => openPurchaseModal(budget * 10)}
-                className="gfm-primary"
-                style={primaryButtonStyle(false)}
-              >
-                <span>Top up · {budget * 10}</span>
-                <BoltIcon />
-              </button>
-            </div>
-          ) : (
-            <div style={errorBoxStyle(theme)} role="alert">
-              <p style={{ margin: 0 }}>
-                {error?.message ?? result?.error ?? 'Generation failed.'}
-              </p>
-            </div>
-          )
+        {(forceZeroBuzz || simulatedInsufficient || isInsufficient) ? (
+          // Explanatory copy under the proactive Top-Up button above.
+          // Distinguishes between the real "you ran out" case and the
+          // debug-toggle "we're pretending you ran out" case so a tester
+          // doesn't get confused about whether their balance is actually
+          // affected.
+          <p style={{ ...subtleStyle, fontSize: 12, marginTop: -4 }}>
+            {forceZeroBuzz
+              ? 'Simulate 0 Buzz is on — Generate is hidden. Uncheck the box above to run for real.'
+              : 'Not enough Buzz for this generation.'}
+          </p>
+        ) : null}
+
+        {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && !isInsufficient && !simulatedInsufficient && (
+          // Non-insufficient errors only — the insufficient path is now
+          // handled proactively above the primary CTA so we don't render
+          // a duplicate "Not enough Buzz" surface here.
+          <div style={errorBoxStyle(theme)} role="alert">
+            <p style={{ margin: 0 }}>
+              {error?.message ?? result?.error ?? 'Generation failed.'}
+            </p>
+          </div>
         )}
 
         {/* Results carousel — every succeeded generation stays visible
@@ -702,9 +766,13 @@ const handleGenerate = async () => {
             theme={theme}
             modelName={model.modelName}
             isBusy={isBusy}
+            onOpenImage={setLightboxUrl}
           />
         )}
       </div>
+      {lightboxUrl && (
+        <Lightbox url={lightboxUrl} onClose={() => setLightboxUrl(null)} />
+      )}
     </div>
   );
 }
@@ -1215,6 +1283,7 @@ function ResultsCarousel({
   theme,
   modelName,
   isBusy,
+  onOpenImage,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   results: BlockWorkflowSnapshot[];
@@ -1222,6 +1291,7 @@ function ResultsCarousel({
   theme: string | null;
   modelName: string;
   isBusy: boolean;
+  onOpenImage: (url: string) => void;
 }) {
   return (
     <div className="gfm-fade-in" style={{ marginTop: 8 }}>
@@ -1248,12 +1318,21 @@ function ResultsCarousel({
             return (
               <div key={key} style={resultCardStyle(theme)}>
                 {firstUrl && (
-                  <img
-                    src={firstUrl}
-                    alt={`Generation ${results.length - i}`}
-                    style={resultCardImageStyle(theme)}
-                    loading="lazy"
-                  />
+                  <button
+                    type="button"
+                    onClick={() => onOpenImage(firstUrl)}
+                    aria-label={`View generation ${results.length - i} full size`}
+                    title="View full size"
+                    className="gfm-image-open"
+                    style={resultImageButtonStyle}
+                  >
+                    <img
+                      src={firstUrl}
+                      alt={`Generation ${results.length - i}`}
+                      style={resultCardImageStyle(theme)}
+                      loading="lazy"
+                    />
+                  </button>
                 )}
                 <div style={resultCardFooterStyle}>
                   {snap.cost?.total != null ? (
@@ -1695,6 +1774,51 @@ function BoltIcon() {
 }
 
 /**
+ * Full-size image viewer. A dark overlay that covers the block (the
+ * iframe sandbox — `allow-scripts allow-forms` — has no popups and the
+ * SDK has no host "open image" message, so the viewer lives in-frame).
+ * Click the backdrop or press Escape to close; the image itself is a
+ * click-trap so clicking it doesn't dismiss. `position: fixed` pins to
+ * the iframe viewport, so the overlay covers the block's rendered area.
+ */
+function Lightbox({ url, onClose }: { url: string; onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onClose]);
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-label="Full size image"
+      onClick={onClose}
+      className="gfm-fade-in"
+      style={lightboxBackdropStyle}
+    >
+      <button
+        type="button"
+        onClick={onClose}
+        aria-label="Close image viewer"
+        title="Close"
+        style={lightboxCloseStyle}
+      >
+        ×
+      </button>
+      <img
+        src={url}
+        alt="Generated image, full size"
+        onClick={(e) => e.stopPropagation()}
+        style={lightboxImageStyle}
+      />
+    </div>
+  );
+}
+
+/**
  * The Generate / Re-generate / Submitting / Generating button label.
  * Renders `{verb} · {cost} ⚡` when a cost is known, or
  * `{verb} (≤ {budget} ⚡)` as a fallback. The "Buzz" word is gone —
@@ -2078,25 +2202,9 @@ const errorBoxStyle = (theme: string | null): CSSProperties => ({
   gap: 6,
 });
 
-// Tier-2 #10: the insufficient-buzz box reframes the visual hierarchy.
-// The error copy becomes a quiet label; the Top-Up button uses the same
-// brand-blue primary style as Generate so it reads as THE action.
-const insufficientBoxStyle = (theme: string | null): CSSProperties => ({
-  padding: 12,
-  borderRadius: 6,
-  background: theme === 'dark' ? '#25262B' : '#f8f9fa',
-  border: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
-  display: 'flex',
-  flexDirection: 'column',
-  gap: 8,
-});
-
-const insufficientCopyStyle = (theme: string | null): CSSProperties => ({
-  margin: 0,
-  fontSize: 13,
-  opacity: 0.85,
-  color: theme === 'dark' ? '#C1C2C5' : '#495057',
-});
+// (insufficientBoxStyle + insufficientCopyStyle removed v0.2.5 —
+// proactive top-up CTA replaces the boxed surface; explanatory copy
+// now lives inline below the primary button.)
 
 // Tier-4 Delta B: horizontal-scrolling carousel for past results.
 // Shares the `gfm-carousel` className with the showcase thumbs row so
@@ -2146,6 +2254,61 @@ const resultCardImageStyle = (_theme: string | null): CSSProperties => ({
   display: 'block',
   background: 'transparent',
 });
+
+// Reset wrapper so the result thumbnail reads as a button (keyboard +
+// pointer "open full size") without inheriting the UA button chrome.
+const resultImageButtonStyle: CSSProperties = {
+  display: 'block',
+  width: '100%',
+  padding: 0,
+  margin: 0,
+  border: 'none',
+  background: 'transparent',
+  cursor: 'zoom-in',
+  borderRadius: 8,
+};
+
+const lightboxBackdropStyle: CSSProperties = {
+  position: 'fixed',
+  inset: 0,
+  zIndex: 1000,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 24,
+  background: 'rgba(0, 0, 0, 0.85)',
+  cursor: 'zoom-out',
+};
+
+const lightboxImageStyle: CSSProperties = {
+  maxWidth: '100%',
+  maxHeight: '100%',
+  width: 'auto',
+  height: 'auto',
+  objectFit: 'contain',
+  borderRadius: 8,
+  cursor: 'default',
+  boxShadow: '0 8px 40px rgba(0, 0, 0, 0.5)',
+};
+
+const lightboxCloseStyle: CSSProperties = {
+  position: 'fixed',
+  top: 12,
+  right: 16,
+  zIndex: 1001,
+  width: 36,
+  height: 36,
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  fontSize: 24,
+  lineHeight: 1,
+  color: '#fff',
+  background: 'rgba(0, 0, 0, 0.5)',
+  border: '1px solid rgba(255, 255, 255, 0.3)',
+  borderRadius: '50%',
+  cursor: 'pointer',
+};
 
 // Footer row inside a card: spent-buzz line on the left, compact icon
 // Download button on the right.
