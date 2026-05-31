@@ -8,7 +8,6 @@ import {
   useBuzzPurchase,
   useBuzzWorkflow,
   useCheckpointPicker,
-  useCivitaiNavigate,
 } from '@civitai/blocks-react';
 import type {
   BlockCheckpointInfo,
@@ -57,7 +56,6 @@ export function App() {
   const { submit, estimate, poll, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
   const checkpointPicker = useCheckpointPicker();
-  const { navigate } = useCivitaiNavigate();
   // Tier-4 Delta A: rootRef is the outer (unpadded) measurement element
   // for useBlockResize. The SDK hook reads `ResizeObserverEntry.contentRect.height`
   // which is the CONTENT-box of the observed element — so any padding on
@@ -586,10 +584,6 @@ const handleGenerate = async () => {
     <div ref={rootRef} style={outerContainerStyle(theme)}>
       <div style={innerContainerStyle()}>
         <StyleSheet />
-        <BlockChromeBar
-          theme={theme}
-          onManageApps={() => navigate('/apps/installed')}
-        />
         <Header
           theme={theme}
           advancedOpen={advancedOpen}
@@ -854,110 +848,6 @@ function PromptTextarea({
       style={textareaStyle(theme)}
       disabled={disabled}
     />
-  );
-}
-
-/**
- * Platform chrome strip at the very top of the block. Two jobs:
- *   1. Make it visually obvious this is a Civitai *app block*, not native
- *      page UI — a subtle top bar (distinct tint + bottom separator,
- *      flush to the block's rounded top edge) with a small app-block icon
- *      + "App block" label.
- *   2. Give the user a way to manage their installed apps. Clicking the
- *      icon opens a small in-block context menu (the iframe sandbox is
- *      `allow-scripts allow-forms` — no popups — so the menu lives in the
- *      block DOM, not a native menu / new window) with a "Manage apps"
- *      item that asks the host to navigate the parent page to
- *      `/apps/installed` via the NAVIGATE bridge message.
- *
- * a11y: the icon is a real button (aria-haspopup=menu, aria-expanded);
- * the menu is role=menu with role=menuitem children; closes on Escape and
- * on outside pointer-down.
- */
-function BlockChromeBar({
-  theme,
-  onManageApps,
-}: {
-  theme: string | null;
-  onManageApps: () => void;
-}) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const wrapRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!menuOpen) return;
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMenuOpen(false);
-    };
-    const onPointerDown = (e: MouseEvent) => {
-      if (wrapRef.current && !wrapRef.current.contains(e.target as Node)) {
-        setMenuOpen(false);
-      }
-    };
-    window.addEventListener('keydown', onKey);
-    window.addEventListener('mousedown', onPointerDown);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.removeEventListener('mousedown', onPointerDown);
-    };
-  }, [menuOpen]);
-
-  return (
-    <div style={chromeBarStyle(theme)}>
-      <div ref={wrapRef} style={{ position: 'relative' }}>
-        <button
-          type="button"
-          onClick={() => setMenuOpen((v) => !v)}
-          aria-label="App block menu"
-          aria-haspopup="menu"
-          aria-expanded={menuOpen}
-          className="gfm-chrome-btn"
-          style={chromeBadgeStyle(theme)}
-        >
-          <AppBlockIcon />
-          <span style={chromeLabelStyle}>App block</span>
-        </button>
-        {menuOpen && (
-          <div role="menu" aria-label="App block actions" style={chromeMenuStyle(theme)}>
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                setMenuOpen(false);
-                onManageApps();
-              }}
-              className="gfm-chrome-menuitem"
-              style={chromeMenuItemStyle(theme)}
-            >
-              Manage apps
-            </button>
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/**
- * Small "apps" glyph (2×2 rounded squares — the launcher/grid idiom) that
- * reads as "this is an app." Matches the inline-SVG style of the other
- * icons in this file (BoltIcon / DownloadIcon).
- */
-function AppBlockIcon() {
-  return (
-    <svg
-      width="13"
-      height="13"
-      viewBox="0 0 24 24"
-      fill="currentColor"
-      aria-hidden
-      style={{ flex: '0 0 auto', display: 'inline-block', verticalAlign: 'middle' }}
-    >
-      <rect x="3" y="3" width="7" height="7" rx="1.5" />
-      <rect x="14" y="3" width="7" height="7" rx="1.5" />
-      <rect x="3" y="14" width="7" height="7" rx="1.5" />
-      <rect x="14" y="14" width="7" height="7" rx="1.5" />
-    </svg>
   );
 }
 
@@ -2077,66 +1967,6 @@ const innerContainerStyle = (): CSSProperties => ({
   gap: 12,
 });
 
-// Platform chrome strip. Negative margins cancel the inner container's
-// 16px padding so the bar sits flush to the block's rounded top edge; the
-// column gap separates it from the Header below. The tint + bottom
-// separator read as "frame", distinct from the white/black body.
-const chromeBarStyle = (theme: string | null): CSSProperties => ({
-  margin: '-16px -16px 0',
-  padding: '5px 10px',
-  display: 'flex',
-  alignItems: 'center',
-  background: theme === 'dark' ? '#202124' : '#f8f9fa',
-  borderBottom: `1px solid ${theme === 'dark' ? '#373A40' : '#e9ecef'}`,
-  borderTopLeftRadius: 11,
-  borderTopRightRadius: 11,
-});
-
-const chromeBadgeStyle = (theme: string | null): CSSProperties => ({
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: 5,
-  padding: '3px 7px',
-  border: '1px solid transparent',
-  borderRadius: 6,
-  background: 'transparent',
-  color: theme === 'dark' ? '#909296' : '#868e96',
-  cursor: 'pointer',
-});
-
-const chromeLabelStyle: CSSProperties = {
-  fontSize: 11,
-  fontWeight: 600,
-  letterSpacing: '0.04em',
-  textTransform: 'uppercase',
-};
-
-const chromeMenuStyle = (theme: string | null): CSSProperties => ({
-  position: 'absolute',
-  top: 'calc(100% + 4px)',
-  left: 0,
-  minWidth: 150,
-  padding: 4,
-  background: theme === 'dark' ? '#25262B' : '#ffffff',
-  border: `1px solid ${theme === 'dark' ? '#373A40' : '#dee2e6'}`,
-  borderRadius: 8,
-  boxShadow: '0 4px 16px rgba(0, 0, 0, 0.18)',
-  zIndex: 50,
-});
-
-const chromeMenuItemStyle = (theme: string | null): CSSProperties => ({
-  display: 'block',
-  width: '100%',
-  textAlign: 'left',
-  padding: '7px 10px',
-  border: 'none',
-  borderRadius: 6,
-  background: 'transparent',
-  color: theme === 'dark' ? '#C1C2C5' : '#222222',
-  fontSize: 13,
-  cursor: 'pointer',
-});
-
 // Tier-3 #1, #2, #3: header is title + three-dots action button on the
 // same row. Subtitle (model name + chip) is gone.
 const headerStyle: CSSProperties = {
@@ -2676,25 +2506,6 @@ const STYLESHEET_CSS = `
 .gfm-dots-btn:disabled {
   cursor: not-allowed;
   opacity: 0.5;
-}
-
-/* Platform chrome strip: app-block badge + its context-menu items. */
-.gfm-chrome-btn:hover {
-  background-color: rgba(125, 125, 125, 0.10);
-}
-[data-theme="dark"] .gfm-chrome-btn:hover {
-  background-color: rgba(255, 255, 255, 0.07);
-}
-.gfm-chrome-btn:focus-visible,
-.gfm-chrome-menuitem:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px ${FOCUS_RING};
-}
-.gfm-chrome-menuitem:hover {
-  background-color: rgba(125, 125, 125, 0.10);
-}
-[data-theme="dark"] .gfm-chrome-menuitem:hover {
-  background-color: rgba(255, 255, 255, 0.07);
 }
 
 /* Carousel thumbs — gentle scale + brightness on hover. */

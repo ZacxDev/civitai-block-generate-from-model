@@ -137,7 +137,6 @@ interface MockState {
     checkpointOpen: ReturnType<typeof vi.fn>;
     checkpointPersist: ReturnType<typeof vi.fn>;
     track: ReturnType<typeof vi.fn>;
-    navigate: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -161,7 +160,6 @@ function makeFreshState(): MockState {
       checkpointOpen: vi.fn(),
       checkpointPersist: vi.fn(),
       track: vi.fn(),
-      navigate: vi.fn(),
     },
   };
 }
@@ -287,7 +285,7 @@ function useCheckpointPicker() {
 }
 
 function useCivitaiNavigate() {
-  return { navigate: state.spies.navigate };
+  return { navigate: () => {} };
 }
 
 function useBlockAnalytics() {
