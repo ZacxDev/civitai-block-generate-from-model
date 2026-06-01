@@ -102,6 +102,39 @@ const JOB_TERMINAL: ReadonlySet<QueueJobStatus> = new Set([
 const isJobInFlight = (s: QueueJobStatus): boolean =>
   s === 'submitting' || s === 'pending' || s === 'processing';
 
+// Short human label per status for the queue-slot badge. Mirrors the
+// on-site generator's vocabulary (Queued / Processing / Done / Failed),
+// adapted: 'submitting' + 'pending' both read "Queued" (the user can't
+// distinguish "we're posting it" from "the orchestrator queued it" and
+// shouldn't have to), 'processing' reads "Generating…".
+function statusLabel(s: QueueJobStatus): string {
+  switch (s) {
+    case 'submitting':
+    case 'pending':
+      return 'Queued';
+    case 'processing':
+      return 'Generating…';
+    case 'succeeded':
+      return 'Done';
+    case 'failed':
+      return 'Failed';
+    case 'expired':
+      return 'Expired';
+    case 'canceled':
+      return 'Canceled';
+  }
+}
+
+// Color tone per status, matching the on-site generationStatusColors map
+// (yellow=in-flight, green=done, red=failed, gray=expired/canceled).
+type StatusTone = 'busy' | 'success' | 'error' | 'neutral';
+function statusTone(s: QueueJobStatus): StatusTone {
+  if (isJobInFlight(s)) return 'busy';
+  if (s === 'succeeded') return 'success';
+  if (s === 'failed') return 'error';
+  return 'neutral'; // expired | canceled
+}
+
 let queueJobSeq = 0;
 function nextLocalId(): string {
   queueJobSeq += 1;
@@ -202,6 +235,41 @@ export function App() {
     setQueue((prev) =>
       prev.map((j) => (j.localId === localId ? { ...j, ...patch } : j))
     );
+  }, []);
+
+  // Cancel an in-flight job. CLIENT-SIDE ONLY: there is no server-side
+  // cancel available to blocks — `useBuzzWorkflow` exposes no cancel(), the
+  // host (IframeHost) has no CANCEL_WORKFLOW postMessage handler, and the
+  // blocks tRPC router has no cancel procedure (unlike the on-site
+  // generator's useCancelTextToImageRequest). So this stops the block from
+  // *tracking* the workflow and clears its card; it does NOT abort the
+  // workflow on the orchestrator — that keeps running and may still spend
+  // the user's Buzz. A server-side cancel would need SDK + host +
+  // civitai-web changes + a republish (out of scope). The affordance exists
+  // so the user can clear a card that's stuck spinning forever.
+  const cancelJob = useCallback(
+    (localId: string) => {
+      // (1) Stop the poll loop. The token may be missing — a remount clears
+      // pollCancelRef while the loop's closure keeps running, or a bridged
+      // job never had a token. Guard the lookup and set cancelled only when
+      // present; the status patch below clears the card regardless.
+      const token = pollCancelRef.current.get(localId);
+      if (token) token.cancelled = true;
+      // (2) Mark terminal so the card renders as a "Canceled" slot (falls
+      // into JOB_TERMINAL). Always patch — even when the token was missing.
+      patchJob(localId, { status: 'canceled' });
+    },
+    [patchJob]
+  );
+
+  // Remove a terminal card from the queue entirely (the small X on
+  // succeeded / failed / canceled slots). Lets the user clear finished
+  // cards without waiting for FIFO eviction. Defensive: also cancels any
+  // lingering poll token so a mid-flight dismiss can't leave a loop running.
+  const dismissJob = useCallback((localId: string) => {
+    const token = pollCancelRef.current.get(localId);
+    if (token) token.cancelled = true;
+    setQueue((prev) => prev.filter((j) => j.localId !== localId));
   }, []);
 
   // Drive one workflow to a terminal status with its own adaptive-backoff
@@ -973,6 +1041,8 @@ export function App() {
             modelName={model.modelName}
             liveEstimatedCost={estimatedCost}
             onOpenImage={setLightboxUrl}
+            onCancelJob={cancelJob}
+            onDismissJob={dismissJob}
           />
         )}
       </div>
@@ -1469,16 +1539,19 @@ function truncate(s: string, n: number): string {
 }
 
 /**
- * Horizontally-scrollable carousel of queued + completed generations
- * (newest first). Mirrors the on-site Civitai generator's queue feed
- * (civitai-web `Queue.tsx` / `QueueItem.tsx`): in-flight jobs (submitting
- * / pending / processing) render as shimmer LoadingCards; succeeded jobs
- * show the image + "Spent N Buzz" + Download; failed / expired / canceled
- * jobs render a compact error card so the user knows that slot is done.
+ * Horizontally-scrollable queue of queued + completed generations (newest
+ * first). Mirrors the on-site Civitai generator's queue feed (civitai-web
+ * `Queue.tsx` / `QueueItem.tsx`): every slot is STATUS-LABELLED via a badge
+ * (Queued / Generating… / Done / Failed / Expired / Canceled) so an
+ * in-flight job is no longer an anonymous shimmer — the user can read what
+ * each slot is doing. In-flight jobs show the shimmer + a Cancel (X)
+ * control; succeeded jobs show the image + "Spent N Buzz" + Download;
+ * failed / expired / canceled jobs render a compact reason card. Every
+ * terminal slot carries a small dismiss (X) so the user can clear it.
  *
  * Each card is a 240px-wide tile (max image height 320px). Multiple jobs
  * can be in flight simultaneously — the queue polls each independently —
- * so several LoadingCards may sit at the front at once.
+ * so several in-flight cards may sit at the front at once.
  *
  * The Download button is NEVER disabled by another in-flight job (task 2):
  * a completed result is downloadable even while newer generations run.
@@ -1490,6 +1563,8 @@ function ResultsCarousel({
   modelName,
   liveEstimatedCost,
   onOpenImage,
+  onCancelJob,
+  onDismissJob,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
   jobs: QueueJob[];
@@ -1499,6 +1574,10 @@ function ResultsCarousel({
   // cost yet (e.g. a bridged job created before the estimate resolved).
   liveEstimatedCost: number | null;
   onOpenImage: (url: string) => void;
+  // Cancel an in-flight job (client-side only — see cancelJob in App).
+  onCancelJob: (localId: string) => void;
+  // Remove a terminal job's card from the queue.
+  onDismissJob: (localId: string) => void;
 }) {
   // Number succeeded cards newest→oldest for alt/aria text. Count total
   // succeeded so the first (newest) succeeded card reads "Generation N".
@@ -1520,8 +1599,10 @@ function ResultsCarousel({
                 <LoadingCard
                   key={job.localId}
                   theme={theme}
+                  status={job.status}
                   cost={job.cost ?? liveEstimatedCost}
                   aspectRatio={job.aspectRatio}
+                  onCancel={() => onCancelJob(job.localId)}
                 />
               );
             }
@@ -1533,6 +1614,7 @@ function ResultsCarousel({
                   status={job.status}
                   message={job.error}
                   aspectRatio={job.aspectRatio}
+                  onDismiss={() => onDismissJob(job.localId)}
                 />
               );
             }
@@ -1542,6 +1624,13 @@ function ResultsCarousel({
             succeededSeen += 1;
             return (
               <div key={job.localId} style={resultCardStyle(theme)}>
+                <div style={cardHeaderStyle}>
+                  <StatusBadge theme={theme} status={job.status} />
+                  <DismissButton
+                    theme={theme}
+                    onClick={() => onDismissJob(job.localId)}
+                  />
+                </div>
                 {firstUrl && (
                   <button
                     type="button"
@@ -1595,27 +1684,48 @@ function ResultsCarousel({
 }
 
 /**
- * Placeholder card shown at the front of the results carousel while a
- * generation is in flight. Visually a shimmer-animated rectangle sized
- * to the selected showcase's aspect ratio so the user sees roughly the
- * shape of the image they're about to get, plus a small "Generating ·
- * {cost} ⚡" footer that mirrors the Generate button's label.
+ * In-flight slot in the results queue. Header carries a STATUS badge
+ * (Queued while submitting/pending, Generating… while processing) plus a
+ * Cancel (X) control — so the user can read what the slot is doing and
+ * clear one that's stuck. Body is a shimmer-animated rectangle sized to
+ * the selected showcase's aspect ratio (rough preview of the shape the
+ * user is about to get). Footer shows the live cost.
  *
- * `aria-busy` + `aria-label="Generating"` give screen readers a hook;
- * `prefers-reduced-motion` already disables the shimmer via the
- * global media-query block.
+ * `aria-busy` + `aria-label` give screen readers a hook;
+ * `prefers-reduced-motion` already disables the shimmer via the global
+ * media-query block.
  */
 function LoadingCard({
   theme,
+  status,
   cost,
   aspectRatio,
+  onCancel,
 }: {
   theme: string | null;
+  status: QueueJobStatus;
   cost: number | null;
   aspectRatio: string;
+  onCancel: () => void;
 }) {
   return (
+    // aria-label stays the constant "Generating" busy hook (screen-reader
+    // + existing test selector); the visible per-status wording lives in
+    // the StatusBadge ("Queued" / "Generating…").
     <div style={resultCardStyle(theme)} aria-busy aria-label="Generating">
+      <div style={cardHeaderStyle}>
+        <StatusBadge theme={theme} status={status} />
+        <button
+          type="button"
+          onClick={onCancel}
+          aria-label="Cancel generation"
+          title="Cancel"
+          className="gfm-icon-btn"
+          style={iconButtonStyle(theme)}
+        >
+          <CloseIcon />
+        </button>
+      </div>
       <div
         style={{
           aspectRatio,
@@ -1659,25 +1769,42 @@ function LoadingCard({
 }
 
 /**
- * Terminal-failure card in the results carousel for a job that ended
- * failed / expired / canceled. Keeps the slot visible (so the user knows
- * that generation is done, not still spinning) with a short reason. No
- * Download button — there's no image. Sized to the job's aspect ratio so
- * it doesn't collapse the row.
+ * Terminal non-success slot for a job that ended failed / expired /
+ * canceled. Header carries the STATUS badge (so the slot reads as done,
+ * not spinning) + a dismiss (X) to clear it. Body holds a short reason.
+ * No Download button — there's no image. Sized to the job's aspect ratio
+ * so it doesn't collapse the row. A canceled card reads neutrally (the
+ * user asked for it); failed / expired read as an error.
  */
 function ErrorCard({
   theme,
   status,
   message,
   aspectRatio,
+  onDismiss,
 }: {
   theme: string | null;
   status: QueueJobStatus;
   message?: string;
   aspectRatio: string;
+  onDismiss: () => void;
 }) {
+  const isCanceled = status === 'canceled';
+  const reason =
+    message ??
+    (isCanceled
+      ? 'Canceled. The workflow may still be running on the server.'
+      : `Generation ${status}`);
   return (
-    <div style={resultCardStyle(theme)} role="alert" aria-label={`Generation ${status}`}>
+    <div
+      style={resultCardStyle(theme)}
+      role={isCanceled ? undefined : 'alert'}
+      aria-label={statusLabel(status)}
+    >
+      <div style={cardHeaderStyle}>
+        <StatusBadge theme={theme} status={status} />
+        <DismissButton theme={theme} onClick={onDismiss} />
+      </div>
       <div
         style={{
           aspectRatio,
@@ -1690,20 +1817,115 @@ function ErrorCard({
           textAlign: 'center',
           padding: 8,
           boxSizing: 'border-box',
-          background: theme === 'dark' ? '#2B1A1A' : '#fff5f5',
-          color: theme === 'dark' ? '#FFA8A8' : '#C92A2A',
-          border: `1px solid ${theme === 'dark' ? '#5C2A2A' : '#ffc9c9'}`,
+          background: isCanceled
+            ? theme === 'dark'
+              ? '#212226'
+              : '#f1f3f5'
+            : theme === 'dark'
+              ? '#2B1A1A'
+              : '#fff5f5',
+          color: isCanceled
+            ? theme === 'dark'
+              ? '#909296'
+              : '#868e96'
+            : theme === 'dark'
+              ? '#FFA8A8'
+              : '#C92A2A',
+          border: `1px solid ${
+            isCanceled
+              ? theme === 'dark'
+                ? '#373A40'
+                : '#dee2e6'
+              : theme === 'dark'
+                ? '#5C2A2A'
+                : '#ffc9c9'
+          }`,
           fontSize: 12,
         }}
       >
-        <span>{message ?? `Generation ${status}`}</span>
-      </div>
-      <div style={resultCardFooterStyle}>
-        <p style={{ ...subtleStyle, marginRight: 'auto', fontSize: 12, textTransform: 'capitalize' }}>
-          {status}
-        </p>
+        <span>{reason}</span>
       </div>
     </div>
+  );
+}
+
+/**
+ * Status badge — a colored dot + label that reads each queue slot's state
+ * at a glance (Queued / Generating… / Done / Failed / Expired / Canceled).
+ * Color follows the on-site generator's mapping (yellow=in-flight,
+ * green=done, red=failed, gray=expired/canceled), adapted to the block's
+ * inline-style + dark/light theming.
+ */
+function StatusBadge({
+  theme,
+  status,
+}: {
+  theme: string | null;
+  status: QueueJobStatus;
+}) {
+  const tone = statusTone(status);
+  const c = statusBadgeColors(tone, theme);
+  const inFlight = isJobInFlight(status);
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 5,
+        padding: '2px 8px',
+        borderRadius: 999,
+        fontSize: 11,
+        fontWeight: 600,
+        lineHeight: 1.4,
+        letterSpacing: 0.2,
+        color: c.fg,
+        background: c.bg,
+        border: `1px solid ${c.border}`,
+        whiteSpace: 'nowrap',
+      }}
+    >
+      {inFlight ? (
+        <Pulse />
+      ) : (
+        <span
+          aria-hidden
+          style={{
+            display: 'inline-block',
+            width: 6,
+            height: 6,
+            borderRadius: 999,
+            background: 'currentColor',
+          }}
+        />
+      )}
+      {statusLabel(status)}
+    </span>
+  );
+}
+
+/**
+ * Small ghost X used to clear a terminal slot (succeeded / failed /
+ * canceled) from the queue. Same ghost-icon styling as the per-card
+ * Download / Cancel controls.
+ */
+function DismissButton({
+  theme,
+  onClick,
+}: {
+  theme: string | null;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      aria-label="Dismiss"
+      title="Dismiss"
+      className="gfm-icon-btn"
+      style={iconButtonStyle(theme)}
+    >
+      <CloseIcon />
+    </button>
   );
 }
 
@@ -2138,6 +2360,27 @@ function DownloadIcon() {
       <path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" />
       <polyline points="7 11 12 16 17 11" />
       <line x1="12" y1="4" x2="12" y2="16" />
+    </svg>
+  );
+}
+
+/** Plain X — cancel an in-flight slot / dismiss a terminal one. */
+function CloseIcon() {
+  return (
+    <svg
+      aria-hidden
+      width={16}
+      height={16}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      style={{ flex: '0 0 auto', display: 'block' }}
+    >
+      <line x1="6" y1="6" x2="18" y2="18" />
+      <line x1="18" y1="6" x2="6" y2="18" />
     </svg>
   );
 }
@@ -2590,6 +2833,44 @@ const resultCardFooterStyle: CSSProperties = {
   gap: 8,
   marginTop: 2,
 };
+
+// Header row inside a queue card: status badge on the left, a compact
+// cancel/dismiss (X) button pinned to the right.
+const cardHeaderStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: 8,
+  minHeight: 28,
+};
+
+// Badge color triplet (fg / bg / border) per status tone, theme-aware.
+// Tracks the on-site generator's status colors (Mantine yellow/green/red/
+// gray) translated to the block's inline-style surfaces.
+function statusBadgeColors(
+  tone: StatusTone,
+  theme: string | null
+): { fg: string; bg: string; border: string } {
+  const dark = theme === 'dark';
+  switch (tone) {
+    case 'busy':
+      return dark
+        ? { fg: '#FFD43B', bg: 'rgba(250, 176, 5, 0.14)', border: 'rgba(250, 176, 5, 0.30)' }
+        : { fg: '#9C6A00', bg: '#FFF3BF', border: '#FFE08A' };
+    case 'success':
+      return dark
+        ? { fg: '#69DB7C', bg: 'rgba(64, 192, 87, 0.14)', border: 'rgba(64, 192, 87, 0.30)' }
+        : { fg: '#2B8A3E', bg: '#EBFBEE', border: '#B2F2BB' };
+    case 'error':
+      return dark
+        ? { fg: '#FFA8A8', bg: 'rgba(224, 49, 49, 0.14)', border: 'rgba(224, 49, 49, 0.32)' }
+        : { fg: '#C92A2A', bg: '#FFF5F5', border: '#FFC9C9' };
+    case 'neutral':
+    default:
+      return dark
+        ? { fg: '#909296', bg: 'rgba(134, 142, 150, 0.14)', border: '#373A40' }
+        : { fg: '#868E96', bg: '#F1F3F5', border: '#DEE2E6' };
+  }
+}
 
 // 28×28 ghost icon button. Subtle by default, brand-tinted on hover.
 const iconButtonStyle = (theme: string | null): CSSProperties => ({

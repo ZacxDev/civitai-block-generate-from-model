@@ -140,12 +140,20 @@ describe('In-flight progress lives on the carousel card, not the CTA (queue mode
     expect(pulse.style.animation).toContain('gfm-pulse');
   });
 
-  it('does NOT show "Queued…" anywhere even when result.status is pending', async () => {
+  it('does NOT show a "Queued…" status line ON THE CTA when result.status is pending', async () => {
+    // Tier-1 #2 is specifically about the GENERATE BUTTON: it must not get
+    // taken over by a polling-status line. v0.2.12 adds a "Queued" badge to
+    // the QUEUE SLOT (Feature 1 — status-labelled slots), which is expected
+    // and lives on the carousel card, NOT the CTA. So scope the assertion
+    // to the button rather than the whole document.
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf_1', status: 'pending' } as never,
     });
     await renderApp(<App />);
-    expect(screen.queryByText(/Queued/)).not.toBeInTheDocument();
+    const cta = screen.getByRole('button', {
+      name: /Generate Image|Re-generate Image/,
+    });
+    expect(cta.textContent ?? '').not.toMatch(/Queued/);
   });
 });
