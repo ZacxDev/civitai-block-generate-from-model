@@ -144,7 +144,7 @@ function nextLocalId(): string {
 export function App() {
   const { ready, context, viewer, theme, blockInstanceId } = useBlockContext();
   const settings = useBlockSettings();
-  const { submit, estimate, poll, status, result, error } = useBuzzWorkflow();
+  const { submit, estimate, poll, cancel, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
   const checkpointPicker = useCheckpointPicker();
   // Latest poll fn in a ref so the per-job poll loops (started inside
@@ -237,29 +237,35 @@ export function App() {
     );
   }, []);
 
-  // Cancel an in-flight job. CLIENT-SIDE ONLY: there is no server-side
-  // cancel available to blocks — `useBuzzWorkflow` exposes no cancel(), the
-  // host (IframeHost) has no CANCEL_WORKFLOW postMessage handler, and the
-  // blocks tRPC router has no cancel procedure (unlike the on-site
-  // generator's useCancelTextToImageRequest). So this stops the block from
-  // *tracking* the workflow and clears its card; it does NOT abort the
-  // workflow on the orchestrator — that keeps running and may still spend
-  // the user's Buzz. A server-side cancel would need SDK + host +
-  // civitai-web changes + a republish (out of scope). The affordance exists
-  // so the user can clear a card that's stuck spinning forever.
+  // Cancel an in-flight job. This is now a REAL server-side cancel: the SDK's
+  // `cancel(workflowId)` round-trips through the host to blocks.cancelWorkflow,
+  // which cancels the workflow on the orchestrator with the viewer's token
+  // (ownership is enforced server-side). So the workflow actually STOPS — it
+  // won't keep spending the user's Buzz. We still do the client-side poll-loop
+  // stop + status patch immediately so the card clears instantly regardless of
+  // the server round-trip (the cancel itself is best-effort: a workflow that
+  // already finished will reject, which is fine — the card is cleared anyway).
   const cancelJob = useCallback(
-    (localId: string) => {
+    (localId: string, workflowId: string | null) => {
       // (1) Stop the poll loop. The token may be missing — a remount clears
       // pollCancelRef while the loop's closure keeps running, or a bridged
       // job never had a token. Guard the lookup and set cancelled only when
       // present; the status patch below clears the card regardless.
       const token = pollCancelRef.current.get(localId);
       if (token) token.cancelled = true;
-      // (2) Mark terminal so the card renders as a "Canceled" slot (falls
+      // (2) Real server-side cancel — only possible once the workflowId has
+      // hydrated from submit(). If it hasn't yet (job still 'submitting'), the
+      // poll-loop stop + status patch are enough; there's no orchestrator
+      // workflow to cancel yet. Fire-and-forget: best-effort, never blocks the
+      // UI clear, swallows rejections (e.g. already-terminal workflow).
+      if (workflowId) {
+        cancel(workflowId).catch(() => undefined);
+      }
+      // (3) Mark terminal so the card renders as a "Canceled" slot (falls
       // into JOB_TERMINAL). Always patch — even when the token was missing.
       patchJob(localId, { status: 'canceled' });
     },
-    [patchJob]
+    [patchJob, cancel]
   );
 
   // Remove a terminal card from the queue entirely (the small X on
@@ -1575,7 +1581,7 @@ function ResultsCarousel({
   liveEstimatedCost: number | null;
   onOpenImage: (url: string) => void;
   // Cancel an in-flight job (client-side only — see cancelJob in App).
-  onCancelJob: (localId: string) => void;
+  onCancelJob: (localId: string, workflowId: string | null) => void;
   // Remove a terminal job's card from the queue.
   onDismissJob: (localId: string) => void;
 }) {
@@ -1602,7 +1608,7 @@ function ResultsCarousel({
                   status={job.status}
                   cost={job.cost ?? liveEstimatedCost}
                   aspectRatio={job.aspectRatio}
-                  onCancel={() => onCancelJob(job.localId)}
+                  onCancel={() => onCancelJob(job.localId, job.workflowId)}
                 />
               );
             }

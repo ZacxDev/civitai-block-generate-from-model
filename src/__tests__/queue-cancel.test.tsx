@@ -6,12 +6,15 @@
  *   (Queued / Generating… / Done / Failed / Canceled) so an in-flight job
  *   is no longer an anonymous shimmer.
  *
- * Feature 2: in-flight slots get a Cancel (X) control. Cancel is
- *   CLIENT-SIDE ONLY — there's no blocks server-side cancel — so it stops
- *   the block's per-job poll loop and flips the slot to a "Canceled" state;
- *   it does NOT abort the workflow on the orchestrator. The poll loop must
- *   stop firing after cancel, and cancel must still work when the poll
- *   token is missing (remount edge).
+ * Feature 2: in-flight slots get a Cancel (X) control. As of v0.2.13 cancel
+ *   is a REAL server-side cancel — it calls useBuzzWorkflow().cancel(workflowId),
+ *   which round-trips through the host to blocks.cancelWorkflow and stops the
+ *   workflow on the orchestrator (so it no longer keeps spending Buzz). The
+ *   block ALSO stops its per-job poll loop and flips the slot to "Canceled"
+ *   immediately, so the card clears regardless of the server round-trip. The
+ *   poll loop must stop firing after cancel; cancel must still clear the card
+ *   when the poll token is missing (remount edge) and when there's no
+ *   workflowId yet (still submitting → client-side clear only, no server call).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor, within } from '@testing-library/react';
@@ -141,6 +144,31 @@ describe('Cancel an in-flight job (Feature 2)', () => {
     const callsAtCancel = spies.poll.mock.calls.length;
     await new Promise((r) => setTimeout(r, 60));
     expect(spies.poll.mock.calls.length).toBe(callsAtCancel);
+
+    // Real server-side cancel (v0.2.13): the SDK cancel() was invoked with the
+    // job's workflowId so the orchestrator actually STOPS the run — not just
+    // the local poll loop. (The host → blocks.cancelWorkflow → orchestrator
+    // path is covered server-side; here we assert the block fires it.)
+    expect(spies.cancel).toHaveBeenCalledWith('wf_1');
+  });
+
+  it('does NOT call server-side cancel for a job with no workflowId yet (still submitting)', async () => {
+    const spies = getMockSpies();
+    // submit() never resolves → the job stays 'submitting' with workflowId
+    // null. Cancelling it must clear the card (client-side) but NOT call the
+    // server cancel — there's no orchestrator workflow to stop yet.
+    const submitGate = deferred<never>();
+    spies.submit.mockImplementation(() => submitGate.promise);
+
+    await renderApp(<App />);
+    await userEvent.click(generate());
+    // The card is enqueued immediately (submitting) with a Cancel control.
+    const cancelBtn = await screen.findByRole('button', { name: 'Cancel generation' });
+    await userEvent.click(cancelBtn);
+
+    await waitFor(() => expect(screen.getByText('Canceled')).toBeInTheDocument());
+    // No workflowId → no server-side cancel call.
+    expect(spies.cancel).not.toHaveBeenCalled();
   });
 
   it('Dismiss removes a terminal (canceled) slot from the queue', async () => {

@@ -133,6 +133,7 @@ interface MockState {
     submit: ReturnType<typeof vi.fn>;
     estimate: ReturnType<typeof vi.fn>;
     poll: ReturnType<typeof vi.fn>;
+    cancel: ReturnType<typeof vi.fn>;
     openPurchaseModal: ReturnType<typeof vi.fn>;
     checkpointOpen: ReturnType<typeof vi.fn>;
     checkpointPersist: ReturnType<typeof vi.fn>;
@@ -156,6 +157,7 @@ function makeFreshState(): MockState {
       submit: vi.fn(),
       estimate: vi.fn(),
       poll: vi.fn(),
+      cancel: vi.fn(),
       openPurchaseModal: vi.fn(),
       checkpointOpen: vi.fn(),
       checkpointPersist: vi.fn(),
@@ -254,10 +256,17 @@ function useBuzzWorkflow() {
       imageUrls: ['https://example.test/result.jpg'],
     } satisfies Partial<BlockWorkflowSnapshot> as BlockWorkflowSnapshot);
   }
+  if (state.spies.cancel.getMockImplementation() == null) {
+    state.spies.cancel.mockResolvedValue({
+      workflowId: 'wf_submit',
+      status: 'canceled',
+    } satisfies Partial<BlockWorkflowSnapshot> as BlockWorkflowSnapshot);
+  }
   return {
     estimate: state.spies.estimate,
     submit: state.spies.submit,
     poll: state.spies.poll,
+    cancel: state.spies.cancel,
     status: state.workflow.status,
     result: state.workflow.result,
     error: state.workflow.error,
