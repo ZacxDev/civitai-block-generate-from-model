@@ -120,6 +120,33 @@ describe('Generation queue (task 3)', () => {
     submitGate.resolve({ workflowId: 'wf_race', status: 'processing' } as never);
   });
 
+  it('an estimate snapshot (whatif) does NOT mint a phantom loading card', async () => {
+    // Regression: after the host estimate fix, a whatif/estimate snapshot
+    // carries workflowId='whatif' (a sentinel) so the SDK validator accepts
+    // it — and the real useBuzzWorkflow leaves that snapshot in the shared
+    // `result` after every estimate() (which fires on mount + showcase pick).
+    // The compatibility bridge keys off result.workflowId, so it used to
+    // mirror the estimate into the queue as a phantom "pending" loading card
+    // — one appeared every time the user clicked a showcase image. The bridge
+    // must treat the 'whatif' sentinel as "not a real workflow" and skip it.
+    await renderApp(<App />);
+
+    // No submit happened — but the shared result now holds the estimate
+    // snapshot (mimics the real SDK after estimate() resolves), status stays
+    // 'confirming' (estimate landed, idle — not in flight).
+    setMockWorkflow({
+      status: 'confirming' as never,
+      result: { workflowId: 'whatif', status: 'pending', cost: { total: 34 } } as never,
+    });
+    // Force the bridge effect ([status, result]) to re-evaluate.
+    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'x');
+
+    // Queue stays empty — zero in-flight cards.
+    await waitFor(() => {
+      expect(screen.queryAllByLabelText('Generating')).toHaveLength(0);
+    });
+  });
+
   it('each job polls + completes independently (different images land per job)', async () => {
     const spies = getMockSpies();
     let submitN = 0;
