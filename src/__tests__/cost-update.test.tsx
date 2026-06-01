@@ -167,4 +167,52 @@ describe('Cost re-estimate on advanced overrides', () => {
     expect(screen.getByRole('button', { name: /· 200/ })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /· 9/ })).not.toBeInTheDocument();
   });
+
+  // ---- Dynamic per-generation pricing: the orchestrator can quote a
+  // different cost for the SAME params between generations. The CTA must
+  // re-quote AFTER each submit so it shows what the NEXT click will cost,
+  // instead of staying frozen on the initial mount estimate.
+  it('re-quotes after a submit so the CTA tracks dynamic per-generation pricing', async () => {
+    const spies = getMockSpies();
+    // Phase flag (not a call counter) so any number of mount/identity quotes
+    // all read 34 — the price only "moves" to 88 once a submit has happened.
+    let phase: 'before' | 'after' = 'before';
+    spies.estimate.mockImplementation(
+      () =>
+        Promise.resolve({
+          workflowId: 'wf',
+          status: 'pending',
+          cost: { total: phase === 'before' ? 34 : 88 },
+        }) as never
+    );
+    let submitN = 0;
+    spies.submit.mockImplementation(() => {
+      submitN += 1;
+      phase = 'after'; // next quote reflects the new price
+      return Promise.resolve({
+        workflowId: `wf_${submitN}`,
+        status: 'processing',
+        cost: { total: 34 },
+      }) as never;
+    });
+
+    await renderApp(<App />);
+    // CTA shows the mount estimate.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /· 34/ })).toBeInTheDocument()
+    );
+
+    // Fire a generation. After submit resolves, the block re-quotes.
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+
+    // The CTA updates to the new price — it is NOT stuck on the initial 34.
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: /· 88/ })).toBeInTheDocument(),
+      { timeout: 1500 }
+    );
+    expect(screen.queryByRole('button', { name: /· 34/ })).not.toBeInTheDocument();
+    expect(spies.submit).toHaveBeenCalledTimes(1);
+  });
 });

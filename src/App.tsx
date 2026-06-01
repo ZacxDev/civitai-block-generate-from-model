@@ -756,6 +756,13 @@ export function App() {
       if (!JOB_TERMINAL.has(snap.status as QueueJobStatus) && snap.workflowId) {
         runJobPollLoop(localId, snap.workflowId);
       }
+      // Re-quote after the submit. The orchestrator prices dynamically — the
+      // SAME params can cost differently between generations — so without
+      // this the CTA stays frozen on the mount/param-change estimate and
+      // never reflects what the NEXT Generate click will actually cost. The
+      // race guard in runEstimateNow keeps the newest result if the user
+      // also edits a cost-bearing field while this is in flight.
+      runEstimateNow();
     } catch (err) {
       // Mark this job failed; the rest of the queue is unaffected. The
       // insufficient-Buzz CTA path keys off the shared `error` separately.
