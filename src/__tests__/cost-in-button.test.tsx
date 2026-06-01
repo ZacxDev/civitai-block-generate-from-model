@@ -100,41 +100,42 @@ describe('Cost inside the Generate button (delta #1)', () => {
   });
 });
 
-describe('No standalone polling status line (delta #2)', () => {
-  it('shows "Generating · {cost} Buzz" inside the button and NO separate paragraph', async () => {
-    // Tier-2 #8 update: the polling label now keeps the cost visible
-    // (was just "Generating…"). The "no standalone paragraph" assertion
-    // still holds — the button is the single source of truth.
+describe('In-flight progress lives on the carousel card, not the CTA (queue model)', () => {
+  it('the CTA stays "Generate Image" while a job is in flight; the carousel LoadingCard shows "Generating · {cost}"', async () => {
+    // Task 2 + 3: the Generate button no longer takes over with a
+    // "Generating · N" label during a generation (that would imply the
+    // form is blocked). The button stays "Generate Image · N" and
+    // clickable so the user can queue more; the per-job progress + sticky
+    // cost moves onto the carousel's shimmer LoadingCard.
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf_1', status: 'processing' } as never,
     });
     await renderApp(<App />);
-    // Button picks up the busy label with the sticky cost.
-    const btn = screen.getByRole('button', { name: /Generating · \d+/ });
-    expect(btn).toBeInTheDocument();
-    expect(btn.textContent ?? '').toMatch(/Generating · \d+/);
-    // There is no <p>Queued…</p> / <p>Generating…</p> sibling. To verify,
-    // make sure the ONLY node containing the "Generating · N Buzz" form
-    // is inside the button. (Note: "Generating with:" in the Advanced
-    // section is unrelated copy and uses a different shape.)
-    const generatingNodes = screen.getAllByText(/Generating · \d+/);
-    expect(generatingNodes).toHaveLength(1);
-    expect(btn.contains(generatingNodes[0]!)).toBe(true);
+
+    // The CTA is still the actionable Generate button.
+    expect(
+      screen.getByRole('button', { name: /Generate Image · \d+/ })
+    ).toBeInTheDocument();
+    // The "Generating · N" sticky-cost copy is on the LoadingCard.
+    const loading = screen.getByLabelText('Generating');
+    expect(loading.textContent ?? '').toMatch(/Generating · \d+/);
+    // And there's exactly one "Generating · N" node (no duplicate on the
+    // button + no standalone paragraph).
+    const generatingNodes = screen.getAllByText(/Generating/);
+    // Exactly one card carries the "Generating · N" sticky cost.
+    expect(generatingNodes.some((n) => /Generating · \d+/.test(n.textContent ?? ''))).toBe(true);
   });
 
-  it('shows the pulse element on the button when polling', async () => {
+  it('shows the pulse element on the carousel LoadingCard when a job is in flight', async () => {
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf_1', status: 'pending' } as never,
     });
     await renderApp(<App />);
-    const btn = screen.getByRole('button', { name: /Generating/ });
-    // The Pulse renders as an aria-hidden <span> with the gfm-pulse
-    // animation. Locate it by attribute — it's the busy-state visual.
-    const pulses = btn.querySelectorAll('span[aria-hidden="true"]');
+    const loading = screen.getByLabelText('Generating');
+    const pulses = loading.querySelectorAll('span[aria-hidden="true"]');
     expect(pulses.length).toBeGreaterThan(0);
-    // Confirm it's the animated pulse (style.animation includes gfm-pulse).
     const pulse = pulses[0] as HTMLElement;
     expect(pulse.style.animation).toContain('gfm-pulse');
   });

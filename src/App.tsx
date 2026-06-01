@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 
 import {
@@ -12,7 +12,6 @@ import {
 import type {
   BlockCheckpointInfo,
   BlockContext,
-  BlockWorkflowSnapshot,
   ModelSlotContext,
   ShowcaseImage,
   WorkflowStatus,
@@ -50,12 +49,76 @@ type ParamOverrides = {
   clipSkip?: number;
 };
 
+/**
+ * One entry in the block's client-side generation queue.
+ *
+ * The on-site Civitai generator lets you fire off many generations that
+ * run + poll independently and stack in a feed (see civitai-web
+ * `src/components/ImageGeneration/Queue.tsx` + `QueueItem.tsx`). The block
+ * replicates that UX WITHOUT touching the SDK: `useBuzzWorkflow` is
+ * single-workflow-stateful (one shared `status` / `result`), but its
+ * `submit()` / `poll()` primitives are stateless async calls that RETURN
+ * the snapshot directly. So we can drive N concurrent workflows by holding
+ * a job array here and running one poll loop per job off the returned
+ * snapshots, ignoring the hook's shared state for queued jobs.
+ *
+ * `localId` is a stable client key minted at enqueue time (before the
+ * workflowId lands from submit()), so React keys + per-job poll-loop
+ * cancellation survive the submit round-trip. `workflowId` hydrates once
+ * submit() resolves.
+ */
+type QueueJobStatus =
+  | 'submitting'
+  | 'pending'
+  | 'processing'
+  | 'succeeded'
+  | 'failed'
+  | 'expired'
+  | 'canceled';
+
+type QueueJob = {
+  localId: string;
+  workflowId: string | null;
+  status: QueueJobStatus;
+  cost: number | null;
+  imageUrls: string[];
+  aspectRatio: string;
+  error?: string;
+  // True when the job was created by the shared-state compatibility bridge
+  // (host/test surfaced a workflow through the hook's `result`/`status`)
+  // rather than by the block's own submit() path. The bridge advances
+  // these from shared state; real-submit jobs are driven by their own
+  // poll loop and ignore shared state.
+  bridged: boolean;
+};
+
+const JOB_TERMINAL: ReadonlySet<QueueJobStatus> = new Set([
+  'succeeded',
+  'failed',
+  'expired',
+  'canceled',
+]);
+
+const isJobInFlight = (s: QueueJobStatus): boolean =>
+  s === 'submitting' || s === 'pending' || s === 'processing';
+
+let queueJobSeq = 0;
+function nextLocalId(): string {
+  queueJobSeq += 1;
+  return `job-${queueJobSeq}-${Date.now()}`;
+}
+
 export function App() {
   const { ready, context, viewer, theme, blockInstanceId } = useBlockContext();
   const settings = useBlockSettings();
   const { submit, estimate, poll, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
   const checkpointPicker = useCheckpointPicker();
+  // Latest poll fn in a ref so the per-job poll loops (started inside
+  // handleGenerate, which closes over the submit-time `poll`) always call
+  // the current hook instance without re-subscribing.
+  const pollRef = useRef(poll);
+  pollRef.current = poll;
   // Tier-4 Delta A: rootRef is the outer (unpadded) measurement element
   // for useBlockResize. The SDK hook reads `ResizeObserverEntry.contentRect.height`
   // which is the CONTENT-box of the observed element — so any padding on
@@ -88,7 +151,14 @@ export function App() {
   // time anyway — this is just for the label-in-the-header.
   const [localCheckpoint, setLocalCheckpoint] = useState<BlockCheckpointInfo | null>(null);
   const [checkpointError, setCheckpointError] = useState<string | null>(null);
-  const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The client-side generation queue. Submitting appends a job; each job
+  // drives its own poll loop to a terminal status (see handleGenerate).
+  // Newest jobs go to the FRONT so the carousel reads newest-first, same
+  // as pastResults did. Capped at MAX_RESULTS with FIFO eviction.
+  const [queue, setQueue] = useState<QueueJob[]>([]);
+  // Map of localId → cancel flag for each running poll loop, so unmount
+  // (or eviction) tears the loops down cleanly.
+  const pollCancelRef = useRef<Map<string, { cancelled: boolean }>>(new Map());
 
   // Selected showcase image index. Drives the prompt + gen params for
   // submit/estimate. Defaults to 0 in the carousel-mount effect below
@@ -119,18 +189,6 @@ export function App() {
   // immediate identity effect already covers the initial cost quote.
   const overrideEstimateMountedRef = useRef(false);
 
-  // Tier-4 Delta B: accumulate every succeeded generation into a small
-  // FIFO history so re-generate stops being destructive — the user sees
-  // a horizontal carousel of past outputs and can compare them. Capped
-  // at MAX_RESULTS to keep the in-memory footprint bounded. The hook's
-  // `result` is still the most-recent (Try Again submits against it);
-  // we just stop visually replacing previous results.
-  //
-  // Capture uses a Set<workflowId> so React's StrictMode double-effect
-  // and re-renders don't push the same snapshot twice.
-  const [pastResults, setPastResults] = useState<BlockWorkflowSnapshot[]>([]);
-  const capturedWorkflowIdsRef = useRef<Set<string>>(new Set());
-
   // Lightbox: clicking a result image opens it full-size in an in-block
   // overlay. Can't defer to a host "open image viewer" message (none
   // exists in the SDK) or window.open (manifest sandbox is
@@ -138,73 +196,101 @@ export function App() {
   // the iframe. `null` = closed.
   const [lightboxUrl, setLightboxUrl] = useState<string | null>(null);
 
-  // useBuzzWorkflow().submit() returns the initial snapshot but the hook
-  // doesn't auto-poll — it's the caller's job to drive poll(workflowId)
-  // until a terminal status. Without this effect the block sits at
-  // status='polling' with the initial 'pending' snapshot forever.
-  //
-  // The hook flips status out of 'polling' itself when a terminal-status
-  // snapshot lands, so the dep array catches the transition and the
-  // cleanup tears the timer down.
+  // Patch one queue job by localId. Used by the per-job poll loops and the
+  // submit path to advance a single job without touching its siblings.
+  const patchJob = useCallback((localId: string, patch: Partial<QueueJob>) => {
+    setQueue((prev) =>
+      prev.map((j) => (j.localId === localId ? { ...j, ...patch } : j))
+    );
+  }, []);
+
+  // Drive one workflow to a terminal status with its own adaptive-backoff
+  // poll loop. `submit()` does NOT auto-poll (SDK gotcha #10) — the caller
+  // owns the loop. Each job runs this independently so multiple in-flight
+  // generations poll concurrently, exactly like the on-site generator's
+  // queue. Reads the snapshot RETURNED by poll() (isolated per call), not
+  // the hook's shared `result`/`status`, so concurrent jobs never clobber
+  // each other.
+  const runJobPollLoop = useCallback(
+    (localId: string, workflowId: string) => {
+      const token = { cancelled: false };
+      pollCancelRef.current.set(localId, token);
+
+      // Cached Flux returns in <10s; cold paths take 30-60s. Fast initial
+      // polls catch the cached case, then back off.
+      const SCHEDULE_MS = [2000, 2000, 3000, 5000, 8000];
+      let attempt = 0;
+      let timer: ReturnType<typeof setTimeout> | null = null;
+
+      const tick = async () => {
+        if (token.cancelled) return;
+        // Don't burn poll budget while the tab is hidden — the
+        // visibilitychange listener re-arms when the user comes back.
+        if (typeof document !== 'undefined' && document.hidden) {
+          timer = null;
+          return;
+        }
+        try {
+          const snap = await pollRef.current(workflowId);
+          if (token.cancelled) return;
+          patchJob(localId, {
+            status: snap.status as QueueJobStatus,
+            cost: snap.cost?.total ?? null,
+            imageUrls: snap.imageUrls ?? [],
+            ...(snap.error ? { error: snap.error } : {}),
+          });
+          if (JOB_TERMINAL.has(snap.status as QueueJobStatus)) {
+            cleanup();
+            return;
+          }
+        } catch {
+          // Transient host/orchestrator hiccup during polling — keep going.
+          // A real terminal failure surfaces as a 'failed'/'expired'
+          // snapshot above, not a thrown poll error.
+        }
+        if (token.cancelled) return;
+        const delay = SCHEDULE_MS[Math.min(attempt, SCHEDULE_MS.length - 1)];
+        attempt += 1;
+        timer = setTimeout(tick, delay);
+      };
+
+      const onVisibility = () => {
+        if (token.cancelled || document.hidden) return;
+        if (timer == null) timer = setTimeout(tick, 0);
+      };
+
+      const cleanup = () => {
+        token.cancelled = true;
+        if (timer != null) {
+          clearTimeout(timer);
+          timer = null;
+        }
+        if (typeof document !== 'undefined') {
+          document.removeEventListener('visibilitychange', onVisibility);
+        }
+        pollCancelRef.current.delete(localId);
+      };
+
+      if (typeof document !== 'undefined') {
+        document.addEventListener('visibilitychange', onVisibility);
+      }
+      // Leading edge — fire immediately so an already-cached workflow gets
+      // its result on the next microtask.
+      timer = setTimeout(tick, 0);
+    },
+    [patchJob]
+  );
+
+  // Tear every running poll loop down on unmount.
   useEffect(() => {
-    if (status !== 'polling') return;
-    const workflowId = result?.workflowId;
-    if (!workflowId) return;
-
-    // Adaptive backoff. Cached Flux returns in <10s; cold paths take
-    // 30-60s. Fast initial polls catch the cached case quickly, then
-    // back off so a long-running cold workflow doesn't hammer the host.
-    const SCHEDULE_MS = [2000, 2000, 3000, 5000, 8000];
-    let attempt = 0;
-    let cancelled = false;
-
-    const tick = async () => {
-      if (cancelled) return;
-      // Don't burn poll budget while the tab is hidden — the
-      // visibilitychange listener re-arms when the user comes back.
-      if (typeof document !== 'undefined' && document.hidden) {
-        pollTimerRef.current = null;
-        return;
-      }
-      try {
-        await poll(workflowId);
-      } catch {
-        // Transient host/orchestrator errors during polling — keep going.
-        // The hook flips status to 'error' on its own only after the
-        // workflow itself reaches a terminal failure; mid-poll
-        // network/5xx hiccups are recoverable.
-      }
-      if (cancelled) return;
-      const delay = SCHEDULE_MS[Math.min(attempt, SCHEDULE_MS.length - 1)];
-      attempt += 1;
-      pollTimerRef.current = setTimeout(tick, delay);
-    };
-
-    // Leading edge — fire immediately so a workflow that's already
-    // succeeded by the time submit() returns gets its result on the
-    // next microtask.
-    pollTimerRef.current = setTimeout(tick, 0);
-
-    const onVisibility = () => {
-      if (cancelled || document.hidden) return;
-      // Resume only when no timer is armed (the tick handler nulled it
-      // out when it bailed on the hidden check). Avoids double-firing
-      // if the visibilitychange races with a scheduled tick.
-      if (pollTimerRef.current == null) {
-        pollTimerRef.current = setTimeout(tick, 0);
-      }
-    };
-    document.addEventListener('visibilitychange', onVisibility);
-
+    const loops = pollCancelRef.current;
     return () => {
-      cancelled = true;
-      document.removeEventListener('visibilitychange', onVisibility);
-      if (pollTimerRef.current != null) {
-        clearTimeout(pollTimerRef.current);
-        pollTimerRef.current = null;
-      }
+      loops.forEach((token) => {
+        token.cancelled = true;
+      });
+      loops.clear();
     };
-  }, [status, result?.workflowId, poll]);
+  }, []);
 
   // Derive showcase/checkpoint via a partial cast so we can run the
   // mount-defaults + auto-estimate effects unconditionally above the
@@ -214,6 +300,13 @@ export function App() {
   const showcaseImages: ShowcaseImage[] = modelCtxRead.showcaseImages ?? [];
   const selectedShowcase =
     selectedShowcaseIdx != null ? showcaseImages[selectedShowcaseIdx] ?? null : null;
+  // CSS aspect-ratio string for the in-flight LoadingCard, derived from the
+  // selected showcase so the placeholder roughly matches the shape of the
+  // image the user is about to get. Falls back to square.
+  const selectedAspectRatio =
+    selectedShowcase && selectedShowcase.width && selectedShowcase.height
+      ? `${selectedShowcase.width} / ${selectedShowcase.height}`
+      : '1 / 1';
   const effectiveCheckpointVersionIdForEstimate =
     (localCheckpoint ?? modelCtxRead.checkpoint ?? null)?.versionId ?? null;
 
@@ -371,15 +464,16 @@ export function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [overrides.width, overrides.height, overrides.steps]);
 
-  // Pull the results carousel back to its leftmost (newest) position
-  // every time a generation starts, so a click on Generate always
-  // reveals where the new image will land — the shimmer LoadingCard
-  // sits at the front, but the user may have scrolled right to inspect
-  // older cards. Effect (vs in-handler) handles cold start: the
-  // carousel only mounts after isInFlight flips true, and effects run
-  // after the commit so the ref is populated by then.
+  // Whether any queued job is still running. Drives the leftmost-scroll
+  // affordance and (in render) the carousel mount.
+  const anyJobInFlight = queue.some((j) => isJobInFlight(j.status));
+
+  // Pull the results carousel back to its leftmost (newest) position every
+  // time the queue gains an in-flight job, so a fresh Generate reveals
+  // where the new card lands even if the user scrolled right to inspect
+  // older results.
   useEffect(() => {
-    if (status !== 'submitting' && status !== 'polling') return;
+    if (!anyJobInFlight) return;
     const el = resultsCarouselRef.current;
     if (!el) return;
     try {
@@ -391,20 +485,89 @@ export function App() {
         // JSDOM / older browsers — affordance is non-load-bearing.
       }
     }
-  }, [status]);
+  }, [anyJobInFlight, queue.length]);
 
-  // Tier-4 Delta B: append every fresh succeeded snapshot to pastResults.
-  // Guard with a workflowId Set so re-renders + StrictMode double-effects
-  // don't duplicate. Newest goes to the front; FIFO eviction keeps the
-  // array bounded at MAX_RESULTS. Failed/canceled/expired snapshots are
-  // intentionally NOT captured — the error UI handles them, and we don't
-  // want a string of failed thumbnails cluttering the carousel.
+  // Compatibility bridge: mirror the hook's SHARED workflow state into the
+  // queue for any workflow the queue doesn't already own via a real
+  // submit(). This keeps the carousel working when the host (or a test)
+  // surfaces a workflow through the hook's `result`/`status` directly,
+  // rather than through the block's own submit path — e.g. a cached
+  // succeeded snapshot returned synchronously, or an externally-injected
+  // in-flight state. Real submits add their own job in handleGenerate and
+  // mark it `bridged:false`, so the bridge never double-counts them
+  // (matched by workflowId).
   useEffect(() => {
-    if (!result || result.status !== 'succeeded' || !result.workflowId) return;
-    if (capturedWorkflowIdsRef.current.has(result.workflowId)) return;
-    capturedWorkflowIdsRef.current.add(result.workflowId);
-    setPastResults((prev) => [result, ...prev].slice(0, MAX_RESULTS));
-  }, [result]);
+    const wfId = result?.workflowId;
+    const sharedInFlight = status === 'submitting' || status === 'polling';
+    const resultIsTerminal =
+      !!result && JOB_TERMINAL.has(result.status as QueueJobStatus);
+    // Nothing to mirror unless the shared state describes a workflow.
+    if (!wfId && !sharedInFlight) return;
+
+    setQueue((prev) => {
+      let next = prev;
+
+      // (1) Mirror the `result` snapshot as its own job (keyed by
+      // workflowId), creating it if the queue doesn't already own it. This
+      // covers a host/test surfacing a completed (or in-progress) workflow
+      // directly through the hook's `result`.
+      if (wfId) {
+        const owned = next.find((j) => j.workflowId === wfId);
+        if (owned) {
+          if (owned.bridged && result) {
+            next = next.map((j) =>
+              j.localId === owned.localId
+                ? {
+                    ...j,
+                    status: result.status as QueueJobStatus,
+                    cost: result.cost?.total ?? j.cost,
+                    imageUrls: result.imageUrls ?? j.imageUrls,
+                    ...(result.error ? { error: result.error } : {}),
+                  }
+                : j
+            );
+          }
+        } else if (result) {
+          const job: QueueJob = {
+            localId: nextLocalId(),
+            workflowId: wfId,
+            status: result.status as QueueJobStatus,
+            cost: result.cost?.total ?? estimatedCost,
+            imageUrls: result.imageUrls ?? [],
+            aspectRatio: selectedAspectRatio,
+            bridged: true,
+            ...(result.error ? { error: result.error } : {}),
+          };
+          next = [job, ...next].slice(0, MAX_RESULTS);
+        }
+      }
+
+      // (2) If the shared status says a workflow is in flight but the
+      // `result` we have is terminal (a STALE leftover from a prior
+      // workflow — the SDK keeps the last snapshot until the new one
+      // lands), the new in-flight workflow has no snapshot yet. Mint a
+      // standalone in-flight job for it — unless one is already running.
+      const needsInFlightCard =
+        sharedInFlight && (resultIsTerminal || !wfId);
+      if (needsInFlightCard && !next.some((j) => isJobInFlight(j.status))) {
+        const inFlightJob: QueueJob = {
+          localId: nextLocalId(),
+          workflowId: null,
+          status: status === 'submitting' ? 'submitting' : 'processing',
+          cost: estimatedCost,
+          imageUrls: [],
+          aspectRatio: selectedAspectRatio,
+          bridged: true,
+        };
+        next = [inFlightJob, ...next].slice(0, MAX_RESULTS);
+      }
+
+      return next;
+    });
+    // selectedAspectRatio / estimatedCost are read for the initial job
+    // shape only; we intentionally don't re-run when they change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [status, result]);
 
   if (!ready) {
     return (
@@ -506,16 +669,14 @@ export function App() {
     }
   };
 
-  // `confirming` is "estimate landed, user reviewing cost" — Generate must
-  // stay clickable in that state, otherwise auto-estimate on mount locks
-  // the button forever. SDK transitions confirming → submitting on click.
-  const busy: WorkflowStatus[] = ['estimating', 'submitting', 'polling'];
-  const isBusy = busy.includes(status);
-  // A submission is "in flight" once it leaves estimating and either the
-  // submit() call or the polling timer is active. Drives the loading-card
-  // placeholder at the front of the results carousel. Estimating is busy
-  // but not in-flight (no workflow exists yet) so we don't show a card.
-  const isInFlight = status === 'submitting' || status === 'polling';
+  // Task 2: the form, thumbs, Generate button, and three-dots NO LONGER
+  // disable during generation. The queue (task 3) makes generation
+  // non-blocking — the user fires off as many as they like and they run
+  // independently — so a blanket "busy → disabled" would defeat the whole
+  // point. The only thing the busy state still drives is the estimating
+  // copy on the CTA (so the user knows a cost quote is in flight). Per-job
+  // progress lives in the results carousel, not on the form.
+  const isEstimating = status === 'estimating';
 
   // Tier-3 #11: Re-generate semantics. If the user already submitted for
   // THIS showcase (without switching since), the next Generate is treated
@@ -525,7 +686,7 @@ export function App() {
   const isRegenerate =
     selectedShowcaseIdx != null && lastSubmittedShowcaseIdx === selectedShowcaseIdx;
 
-const handleGenerate = async () => {
+  const handleGenerate = async () => {
     // Debug short-circuit: when "Simulate 0 Buzz" is checked, skip the
     // real submit and synthesize the insufficient-Buzz state. The
     // existing error block renders the top-up CTA, which still opens
@@ -534,29 +695,46 @@ const handleGenerate = async () => {
       setSimulatedInsufficient(true);
       return;
     }
+    // Either the user pressed 🎲 (manual), or this is a re-gen on the
+    // same showcase (auto). Both paths drop the seed for this submit.
+    const randomizeForThisSubmit = randomizeSeedOnce || isRegenerate;
+    const params = buildSubmitParams(
+      prompt,
+      suffix,
+      selectedShowcase,
+      overrides,
+      randomizeForThisSubmit
+    );
+    // Reset the one-shot randomize flag after consuming it so the *next*
+    // submit reverts to the showcase's seed (unless the user clicks 🎲
+    // again). Mark THIS showcase as submitted so the next click flips to
+    // re-generate (random seed).
+    if (randomizeSeedOnce) setRandomizeSeedOnce(false);
+    if (selectedShowcaseIdx != null) {
+      setLastSubmittedShowcaseIdx(selectedShowcaseIdx);
+    }
+
+    // Enqueue the job immediately (newest at front) so the carousel shows
+    // a "submitting" loading card the instant the user clicks — no waiting
+    // on the submit round-trip. Snapshot the cost from the live estimate.
+    const localId = nextLocalId();
+    setQueue((prev) =>
+      [
+        {
+          localId,
+          workflowId: null,
+          status: 'submitting' as QueueJobStatus,
+          cost: estimatedCost,
+          imageUrls: [],
+          aspectRatio: selectedAspectRatio,
+          bridged: false,
+        },
+        ...prev,
+      ].slice(0, MAX_RESULTS)
+    );
+
     try {
-      // Either the user pressed 🎲 (manual), or this is a re-gen on the
-      // same showcase (auto). Both paths drop the seed for this submit.
-      const randomizeForThisSubmit = randomizeSeedOnce || isRegenerate;
-      const params = buildSubmitParams(
-        prompt,
-        suffix,
-        selectedShowcase,
-        overrides,
-        randomizeForThisSubmit
-      );
-      // Reset the one-shot randomize flag after consuming it so the
-      // *next* submit reverts to the showcase's seed (unless the user
-      // clicks 🎲 again). Important: must run after the build call.
-      if (randomizeSeedOnce) setRandomizeSeedOnce(false);
-      // Mark THIS showcase as having had a Generate fired against it so
-      // the next click flips to re-generate (random seed). Do this
-      // before awaiting submit so the button label updates on the next
-      // render (the state change is what makes "Re-generate" appear).
-      if (selectedShowcaseIdx != null) {
-        setLastSubmittedShowcaseIdx(selectedShowcaseIdx);
-      }
-      await submit({
+      const snap = await submit({
         kind: 'textToImage',
         modelId: model.modelId,
         modelVersionId: model.modelVersionId,
@@ -565,8 +743,26 @@ const handleGenerate = async () => {
         // re-validates everything server-side; this is just for parity.
         params,
       });
-    } catch {
-      // Surface via `error` in render; nothing to do here.
+      // Hydrate the job with the returned workflowId + initial snapshot.
+      patchJob(localId, {
+        workflowId: snap.workflowId,
+        status: snap.status as QueueJobStatus,
+        cost: snap.cost?.total ?? estimatedCost,
+        imageUrls: snap.imageUrls ?? [],
+        ...(snap.error ? { error: snap.error } : {}),
+      });
+      // submit() does NOT auto-poll (SDK gotcha #10) — start this job's
+      // own poll loop unless it already came back terminal (cached hit).
+      if (!JOB_TERMINAL.has(snap.status as QueueJobStatus) && snap.workflowId) {
+        runJobPollLoop(localId, snap.workflowId);
+      }
+    } catch (err) {
+      // Mark this job failed; the rest of the queue is unaffected. The
+      // insufficient-Buzz CTA path keys off the shared `error` separately.
+      patchJob(localId, {
+        status: 'failed',
+        error: err instanceof Error ? err.message : 'submit failed',
+      });
     }
   };
 
@@ -588,7 +784,7 @@ const handleGenerate = async () => {
           theme={theme}
           advancedOpen={advancedOpen}
           onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
-          isBusy={isBusy}
+          isBusy={false}
         />
 
         {checkpointError && (
@@ -618,7 +814,6 @@ const handleGenerate = async () => {
                     aria-label={`Pick preview ${idx + 1}`}
                     aria-pressed={idx === selectedShowcaseIdx}
                     onClick={() => setSelectedShowcaseIdx(idx)}
-                    disabled={isBusy}
                     className="gfm-thumb"
                     style={thumbButtonStyle(idx === selectedShowcaseIdx, theme, img)}
                   >
@@ -639,7 +834,7 @@ const handleGenerate = async () => {
               value={prompt}
               onChange={setPrompt}
               onSubmit={handleGenerate}
-              disabled={isBusy}
+              disabled={false}
               theme={theme}
             />
           </div>
@@ -653,7 +848,7 @@ const handleGenerate = async () => {
             randomizeSeedOnce={randomizeSeedOnce}
             onRandomizeSeed={() => setRandomizeSeedOnce(true)}
             onUndoRandomize={() => setRandomizeSeedOnce(false)}
-            isBusy={isBusy}
+            isBusy={false}
             theme={theme}
             showCheckpointPicker={showCheckpointPicker}
             effectiveCheckpoint={effectiveCheckpoint}
@@ -675,7 +870,6 @@ const handleGenerate = async () => {
                   setEstimateError(null);
                 }
               }}
-              disabled={isBusy}
               aria-label="Simulate zero Buzz balance"
             />
             <span>Simulate 0 Buzz (test top-up)</span>
@@ -700,12 +894,26 @@ const handleGenerate = async () => {
             <button
               type="button"
               onClick={handleGenerate}
-              disabled={isBusy}
+              // Task 2: the Generate button is NEVER disabled by an
+              // in-flight generation OR a mid-flight cost re-quote — the
+              // queue makes submission non-blocking, so the user can keep
+              // firing off more at any time. While a re-estimate is in
+              // flight we keep the last-known cost on the label (a small
+              // pulse signals the quote is refreshing) so the number never
+              // flickers blank; "Estimating cost…" shows only on the very
+              // first quote, before any cost has landed.
               className="gfm-primary"
-              style={primaryButtonStyle(isBusy)}
+              style={primaryButtonStyle(false)}
             >
-              {isBusy && <Pulse />}
-              <ButtonLabel label={labelForStatus(status, budget, estimatedCost, isRegenerate)} />
+              {isEstimating && <Pulse />}
+              <ButtonLabel
+                label={labelForStatus(
+                  isEstimating && estimatedCost == null ? 'estimating' : 'idle',
+                  budget,
+                  estimatedCost,
+                  isRegenerate
+                )}
+              />
             </button>
           )}
 
@@ -743,29 +951,20 @@ const handleGenerate = async () => {
           </div>
         )}
 
-        {/* Results carousel — every succeeded generation stays visible
-            for the session (persists across showcase swaps; see commit
-            89b8373). While a generation is in flight, a shimmer-animated
-            LoadingCard sits at the front of the row anchored to where
-            the next result will land. */}
-        {(isInFlight || pastResults.length > 0) && (
+        {/* Results carousel — the queue, newest-first. In-flight jobs
+            (submitting / pending / processing) render as shimmer
+            LoadingCards anchored where their result will land; succeeded
+            jobs show the image + spend + Download. Multiple jobs can be
+            in flight at once (task 3) — each polls independently and lands
+            in its own card. The whole row persists for the session and
+            across showcase swaps. */}
+        {queue.length > 0 && (
           <ResultsCarousel
             scrollRef={resultsCarouselRef}
-            results={pastResults}
-            inFlight={
-              isInFlight
-                ? {
-                    cost: estimatedCost,
-                    aspectRatio:
-                      selectedShowcase && selectedShowcase.width && selectedShowcase.height
-                        ? `${selectedShowcase.width} / ${selectedShowcase.height}`
-                        : '1 / 1',
-                  }
-                : null
-            }
+            jobs={queue}
             theme={theme}
             modelName={model.modelName}
-            isBusy={isBusy}
+            liveEstimatedCost={estimatedCost}
             onOpenImage={setLightboxUrl}
           />
         )}
@@ -1263,36 +1462,42 @@ function truncate(s: string, n: number): string {
 }
 
 /**
- * Tier-4 Delta B: horizontally-scrollable carousel of past generations
- * (newest first). Each card is a 240px-wide tile with the result image
- * (max-height 320px), a "Spent N Buzz" line, and a Download button.
+ * Horizontally-scrollable carousel of queued + completed generations
+ * (newest first). Mirrors the on-site Civitai generator's queue feed
+ * (civitai-web `Queue.tsx` / `QueueItem.tsx`): in-flight jobs (submitting
+ * / pending / processing) render as shimmer LoadingCards; succeeded jobs
+ * show the image + "Spent N Buzz" + Download; failed / expired / canceled
+ * jobs render a compact error card so the user knows that slot is done.
  *
- * Try Again lives at the block level (single button below the carousel)
- * since the hook's `result` already tracks the newest snapshot — putting
- * Try Again on every card would duplicate the action without clarifying
- * what re-rolls against what. The Try Again button is rendered as a
- * trailing card so it stays adjacent to the newest result.
+ * Each card is a 240px-wide tile (max image height 320px). Multiple jobs
+ * can be in flight simultaneously — the queue polls each independently —
+ * so several LoadingCards may sit at the front at once.
  *
- * isBusy gates every interactive element on every card (Download +
- * Try Again) so mid-flight clicks can't fire stale submits.
+ * The Download button is NEVER disabled by another in-flight job (task 2):
+ * a completed result is downloadable even while newer generations run.
  */
 function ResultsCarousel({
   scrollRef,
-  results,
-  inFlight,
+  jobs,
   theme,
   modelName,
-  isBusy,
+  liveEstimatedCost,
   onOpenImage,
 }: {
   scrollRef: RefObject<HTMLDivElement | null>;
-  results: BlockWorkflowSnapshot[];
-  inFlight: { cost: number | null; aspectRatio: string } | null;
+  jobs: QueueJob[];
   theme: string | null;
   modelName: string;
-  isBusy: boolean;
+  // Live estimate fallback for an in-flight job that hasn't snapshotted a
+  // cost yet (e.g. a bridged job created before the estimate resolved).
+  liveEstimatedCost: number | null;
   onOpenImage: (url: string) => void;
 }) {
+  // Number succeeded cards newest→oldest for alt/aria text. Count total
+  // succeeded so the first (newest) succeeded card reads "Generation N".
+  const succeededCount = jobs.filter((j) => j.status === 'succeeded').length;
+  let succeededSeen = 0;
+
   return (
     <div className="gfm-fade-in" style={{ marginTop: 8 }}>
       <div className="gfm-carousel-wrap" style={carouselWrapStyle(theme)}>
@@ -1302,44 +1507,57 @@ function ResultsCarousel({
           style={resultsCarouselStyle}
           data-testid="gfm-results-carousel"
         >
-          {inFlight && (
-            <LoadingCard
-              theme={theme}
-              cost={inFlight.cost}
-              aspectRatio={inFlight.aspectRatio}
-            />
-          )}
-          {results.map((snap, i) => {
-            const firstUrl = snap.imageUrls?.[0] ?? null;
-            // Key on workflowId when we have it (stable across re-renders);
-            // fall back to index for the brief window before submit-returns
-            // hydrates the workflowId.
-            const key = snap.workflowId ?? `idx-${i}`;
+          {jobs.map((job) => {
+            if (isJobInFlight(job.status)) {
+              return (
+                <LoadingCard
+                  key={job.localId}
+                  theme={theme}
+                  cost={job.cost ?? liveEstimatedCost}
+                  aspectRatio={job.aspectRatio}
+                />
+              );
+            }
+            if (job.status !== 'succeeded') {
+              return (
+                <ErrorCard
+                  key={job.localId}
+                  theme={theme}
+                  status={job.status}
+                  message={job.error}
+                  aspectRatio={job.aspectRatio}
+                />
+              );
+            }
+            const firstUrl = job.imageUrls[0] ?? null;
+            // Newest succeeded card gets the highest number.
+            const genNumber = succeededCount - succeededSeen;
+            succeededSeen += 1;
             return (
-              <div key={key} style={resultCardStyle(theme)}>
+              <div key={job.localId} style={resultCardStyle(theme)}>
                 {firstUrl && (
                   <button
                     type="button"
                     onClick={() => onOpenImage(firstUrl)}
-                    aria-label={`View generation ${results.length - i} full size`}
+                    aria-label={`View generation ${genNumber} full size`}
                     title="View full size"
                     className="gfm-image-open"
                     style={resultImageButtonStyle}
                   >
                     <img
                       src={firstUrl}
-                      alt={`Generation ${results.length - i}`}
+                      alt={`Generation ${genNumber}`}
                       style={resultCardImageStyle(theme)}
                       loading="lazy"
                     />
                   </button>
                 )}
                 <div style={resultCardFooterStyle}>
-                  {snap.cost?.total != null ? (
+                  {job.cost != null ? (
                     <p style={{ ...subtleStyle, marginRight: 'auto', fontSize: 12 }}>
                       Spent{' '}
                       <strong style={{ opacity: 1, color: 'inherit' }}>
-                        {snap.cost.total} Buzz
+                        {job.cost} Buzz
                       </strong>
                     </p>
                   ) : (
@@ -1351,7 +1569,6 @@ function ResultsCarousel({
                       onClick={() => {
                         void downloadImage(firstUrl, modelName);
                       }}
-                      disabled={isBusy}
                       aria-label="Download"
                       title="Download"
                       className="gfm-icon-btn"
@@ -1428,6 +1645,55 @@ function LoadingCard({
               </>
             )}
           </span>
+        </p>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Terminal-failure card in the results carousel for a job that ended
+ * failed / expired / canceled. Keeps the slot visible (so the user knows
+ * that generation is done, not still spinning) with a short reason. No
+ * Download button — there's no image. Sized to the job's aspect ratio so
+ * it doesn't collapse the row.
+ */
+function ErrorCard({
+  theme,
+  status,
+  message,
+  aspectRatio,
+}: {
+  theme: string | null;
+  status: QueueJobStatus;
+  message?: string;
+  aspectRatio: string;
+}) {
+  return (
+    <div style={resultCardStyle(theme)} role="alert" aria-label={`Generation ${status}`}>
+      <div
+        style={{
+          aspectRatio,
+          maxHeight: 320,
+          width: '100%',
+          borderRadius: 8,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          textAlign: 'center',
+          padding: 8,
+          boxSizing: 'border-box',
+          background: theme === 'dark' ? '#2B1A1A' : '#fff5f5',
+          color: theme === 'dark' ? '#FFA8A8' : '#C92A2A',
+          border: `1px solid ${theme === 'dark' ? '#5C2A2A' : '#ffc9c9'}`,
+          fontSize: 12,
+        }}
+      >
+        <span>{message ?? `Generation ${status}`}</span>
+      </div>
+      <div style={resultCardFooterStyle}>
+        <p style={{ ...subtleStyle, marginRight: 'auto', fontSize: 12, textTransform: 'capitalize' }}>
+          {status}
         </p>
       </div>
     </div>

@@ -158,12 +158,14 @@ it('clicking Download fetches the image as a Blob and clicks an anchor with the 
     expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument();
   });
 
-  it('disables Download while a re-submission is in flight (a prior result is in the carousel)', async () => {
-    // Status='submitting' represents a re-generate mid-call. Result is
-    // still the prior success snapshot.
+  it('keeps Download ENABLED on a completed card while a newer generation is in flight (task 2)', async () => {
+    // Task 2 + 3: completed results stay downloadable even while newer
+    // queued jobs are still running. The prior implementation disabled
+    // every Download on any busy state; the queue model makes each
+    // completed card independently actionable.
     setMockWorkflow({ status: 'submitting', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
-    expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Download' })).not.toBeDisabled();
   });
 });
 

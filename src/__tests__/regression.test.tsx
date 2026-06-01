@@ -60,20 +60,26 @@ describe('Randomize seed one-shot (advanced editable)', () => {
   });
 });
 
-describe('isBusy disables every interactive control', () => {
-  it('all primary controls are disabled while polling', async () => {
+describe('form stays interactive while a generation is in flight (task 2)', () => {
+  it('prompt, Generate, and thumbs are NOT disabled while a job polls', async () => {
+    // Task 2: the blanket "busy → disabled" is gone. The queue (task 3)
+    // makes submission non-blocking, so the user keeps editing + firing
+    // off more generations while earlier ones run. A shared in-flight
+    // workflow (mirrored into the queue via the bridge) must NOT lock the
+    // form.
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf', status: 'processing' } as never,
     });
     await renderApp(<App />);
 
-    expect(screen.getByLabelText('Prompt (optional)')).toBeDisabled();
-    // Tier-2 #8: polling label now includes sticky cost ("Generating · N Buzz").
-    expect(screen.getByRole('button', { name: /Generating/ })).toBeDisabled();
-    // Carousel thumbs.
-    expect(screen.getByRole('button', { name: 'Pick preview 1' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Pick preview 2' })).toBeDisabled();
+    expect(screen.getByLabelText('Prompt (optional)')).not.toBeDisabled();
+    // The CTA stays "Generate Image" (no Submitting/Generating takeover)
+    // and remains clickable — the per-job progress lives in the carousel.
+    expect(screen.getByRole('button', { name: /Generate Image/ })).not.toBeDisabled();
+    // Carousel thumbs stay pickable.
+    expect(screen.getByRole('button', { name: 'Pick preview 1' })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Pick preview 2' })).not.toBeDisabled();
   });
 });
 

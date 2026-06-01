@@ -90,4 +90,81 @@ describe('Cost re-estimate on advanced overrides', () => {
     });
     expect(spies.estimate).not.toHaveBeenCalled();
   });
+
+  // ---- Task 1: the RENDERED CTA cost must track the LATEST resolved
+  // estimate, not a stale snapshot. The earlier deltas asserted the
+  // re-estimate FIRED; these assert the button's displayed number actually
+  // updates to the new value.
+
+  it('the rendered CTA cost updates to the new value after a re-estimate resolves', async () => {
+    const spies = getMockSpies();
+    spies.estimate.mockResolvedValue({
+      workflowId: 'wf',
+      status: 'pending',
+      cost: { total: 34 },
+    } as never);
+    await renderApp(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /· 34/ })).toBeInTheDocument()
+    );
+
+    spies.estimate.mockResolvedValue({
+      workflowId: 'wf',
+      status: 'pending',
+      cost: { total: 120 },
+    } as never);
+    await openAdvanced();
+    fireEvent.change(screen.getByLabelText('Steps'), { target: { value: '50' } });
+
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: /· 120/ })).toBeInTheDocument(),
+      { timeout: 1500 }
+    );
+    // The stale value is gone.
+    expect(screen.queryByRole('button', { name: /· 34/ })).not.toBeInTheDocument();
+  });
+
+  it('out-of-order resolution: a slow EARLIER estimate cannot clobber the newer one', async () => {
+    // The mount estimate resolves AFTER the override estimate. The race
+    // guard must keep the newer (override) value on the CTA, not let the
+    // late mount estimate overwrite it with a stale number.
+    const spies = getMockSpies();
+    const mount = (() => {
+      let resolve!: (v: unknown) => void;
+      const promise = new Promise((r) => (resolve = r));
+      return { promise, resolve };
+    })();
+    let n = 0;
+    spies.estimate.mockImplementation(() => {
+      n += 1;
+      // First call (mount) is slow; subsequent (override) resolve fast.
+      return n === 1
+        ? (mount.promise as Promise<never>)
+        : (Promise.resolve({
+            workflowId: 'wf',
+            status: 'pending',
+            cost: { total: 200 },
+          }) as never);
+    });
+
+    await renderApp(<App />);
+    await openAdvanced();
+    fireEvent.change(screen.getByLabelText('Steps'), { target: { value: '48' } });
+
+    // Override estimate resolves → CTA shows 200.
+    await waitFor(
+      () => expect(screen.getByRole('button', { name: /· 200/ })).toBeInTheDocument(),
+      { timeout: 1500 }
+    );
+
+    // NOW the slow mount estimate resolves with a stale value — it must be
+    // ignored by the race guard.
+    await act(async () => {
+      mount.resolve({ workflowId: 'wf', status: 'pending', cost: { total: 9 } });
+      await Promise.resolve();
+    });
+
+    expect(screen.getByRole('button', { name: /· 200/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /· 9/ })).not.toBeInTheDocument();
+  });
 });

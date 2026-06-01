@@ -66,14 +66,17 @@ describe('Three-dots Advanced toggle (Tier-3 #3)', () => {
     expect(section).toHaveAttribute('aria-hidden', 'true');
   });
 
-  it('disables the three-dots while isBusy', async () => {
+  it('keeps the three-dots enabled while a generation is in flight (task 2)', async () => {
+    // Task 2: nothing on the form disables during generation anymore —
+    // the user can open Advanced and tweak params for the next queued
+    // submit while earlier jobs are still polling.
     setMockWorkflow({
       status: 'polling',
       result: { workflowId: 'wf_1', status: 'pending' } as never,
     });
     await renderApp(<App />);
     const dots = screen.getByRole('button', { name: 'Advanced settings' });
-    expect(dots).toBeDisabled();
+    expect(dots).not.toBeDisabled();
   });
 
   it('does NOT render the old inline "⚙ Advanced" toggle row below the prompt', async () => {
