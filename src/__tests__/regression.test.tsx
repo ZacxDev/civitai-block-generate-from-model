@@ -116,9 +116,9 @@ describe('Dark theme styling', () => {
     const { container } = await renderApp(<App />);
     const root = container.firstElementChild as HTMLElement;
     const bg = root.style.background.toLowerCase();
-    // Tier-3 #4: light surface bumped to pure white (#ffffff) so the
-    // 1px border + outset shadow read as a distinct card against the
-    // host page's tinted backgrounds.
+    // Light surface is pure white (#ffffff) so the block content reads
+    // cleanly inside the host's AppBlockChrome frame (the block draws no
+    // border of its own — the host owns the chrome).
     expect(bg === '#ffffff' || bg === 'rgb(255, 255, 255)').toBe(true);
   });
 });

@@ -1930,10 +1930,11 @@ const MAX_RESULTS = 8;
 
 // --------- styles (inline; the host injects [data-theme]) ---------
 
-// Tier-3 #4: borderfied + slightly rounded container. The host page is
-// often busy, so a 1px border + a subtle outset shadow (light theme
-// only) helps the block read as a discrete surface rather than blending
-// into the model page.
+// The container is the block's content SURFACE only — background + text
+// colour. It deliberately draws NO border / radius / shadow: the host
+// (civitai-web's `AppBlockChrome`) now renders the trust frame AROUND the
+// iframe (bordered box + "App block" badge), so a border drawn here just
+// doubles it. The frame belongs at the host layer, not inside the block.
 //
 // Tier-4 Delta A: split into an outer (rootRef-bound) and an inner
 // (padded layout) wrapper. The SDK's `useBlockResize` reads
@@ -1944,7 +1945,7 @@ const MAX_RESULTS = 8;
 // element makes the outer's content-box equal the full visual layout.
 //
 // `box-sizing: border-box` is set defensively so any future width/height
-// constraints behave predictably with the border.
+// constraints behave predictably.
 const outerContainerStyle = (theme: string | null): CSSProperties => ({
   boxSizing: 'border-box',
   display: 'block',
@@ -1953,9 +1954,7 @@ const outerContainerStyle = (theme: string | null): CSSProperties => ({
     '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif',
   color: theme === 'dark' ? '#C1C2C5' : '#222222',
   background: theme === 'dark' ? '#1a1b1e' : '#ffffff',
-  border: `1px solid ${theme === 'dark' ? '#373A40' : '#dee2e6'}`,
-  borderRadius: 12,
-  boxShadow: theme === 'dark' ? 'none' : '0 1px 2px rgba(0, 0, 0, 0.04)',
+  // No border / borderRadius / boxShadow — the host frame owns the chrome.
   // Important: do NOT set padding here. See Delta A note above.
 });
 
