@@ -24,6 +24,7 @@ import {
   getMockSpies,
   renderApp,
   resetBlocksReactMock,
+  setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -77,6 +78,46 @@ describe('Generation queue (task 3)', () => {
     await waitFor(() => {
       expect(screen.getAllByLabelText('Generating')).toHaveLength(2);
     });
+  });
+
+  it('a single submit makes exactly ONE card — the bridge does not duplicate it', async () => {
+    // Regression for the duplicate-card bug: handleGenerate enqueues its job
+    // BEFORE submit() resolves (workflowId still null), and the real
+    // useBuzzWorkflow.submit updates the hook's SHARED result (carrying the
+    // workflowId) in a separate microtask from handleGenerate's patchJob that
+    // stamps the job. In that gap the compatibility bridge used to see a
+    // workflowId no job "owned" yet and mint a SECOND, bridged card — the extra
+    // one showed 0 Buzz and never resolved. The guard must suppress it.
+    const spies = getMockSpies();
+    const submitGate = deferred<never>();
+    spies.submit.mockImplementation(() => submitGate.promise); // stays in flight
+    const pollGate = deferred<never>();
+    spies.poll.mockImplementation(() => pollGate.promise);
+
+    await renderApp(<App />);
+    const generate = () =>
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ });
+
+    await userEvent.click(generate());
+    await waitFor(() => expect(spies.submit).toHaveBeenCalledTimes(1));
+    // One in-flight card: the non-bridged submit job (workflowId still null).
+    expect(screen.getAllByLabelText('Generating')).toHaveLength(1);
+
+    // Now the hook's shared result gains a workflowId mid-flight (mimicking
+    // submit's setResult landing before patchJob), then a re-render drives the
+    // bridge to re-evaluate. The pending own-submit is about to own wf_race.
+    setMockWorkflow({
+      status: 'polling',
+      result: { workflowId: 'wf_race', status: 'processing' } as never,
+    });
+    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'x'); // force re-render
+
+    // Still exactly ONE in-flight card — no bridged duplicate for wf_race.
+    await waitFor(() => {
+      expect(screen.getAllByLabelText('Generating')).toHaveLength(1);
+    });
+    // Allow the in-flight test to settle the hanging promises.
+    submitGate.resolve({ workflowId: 'wf_race', status: 'processing' } as never);
   });
 
   it('each job polls + completes independently (different images land per job)', async () => {

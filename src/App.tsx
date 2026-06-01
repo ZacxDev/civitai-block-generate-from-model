@@ -602,17 +602,31 @@ export function App() {
             );
           }
         } else if (result) {
-          const job: QueueJob = {
-            localId: nextLocalId(),
-            workflowId: wfId,
-            status: result.status as QueueJobStatus,
-            cost: result.cost?.total ?? estimatedCost,
-            imageUrls: result.imageUrls ?? [],
-            aspectRatio: selectedAspectRatio,
-            bridged: true,
-            ...(result.error ? { error: result.error } : {}),
-          };
-          next = [job, ...next].slice(0, MAX_RESULTS);
+          // BUGFIX: don't mint a bridged card for `wfId` while a non-bridged
+          // submit is in flight without its workflowId yet. handleGenerate
+          // enqueues its job BEFORE submit() resolves (workflowId still null),
+          // and submit() updates the hook's shared `result` (carrying wfId) in
+          // a separate microtask from handleGenerate's patchJob that stamps the
+          // job. In that gap the bridge would see a wfId no job "owns" yet and
+          // create a DUPLICATE card — the extra one shows 0 Buzz and never
+          // resolves (the real poll loop runs on the original job). The
+          // pending own-submit is about to own this exact workflow, so skip.
+          const pendingOwnSubmit = next.some(
+            (j) => !j.bridged && j.workflowId == null && isJobInFlight(j.status)
+          );
+          if (!pendingOwnSubmit) {
+            const job: QueueJob = {
+              localId: nextLocalId(),
+              workflowId: wfId,
+              status: result.status as QueueJobStatus,
+              cost: result.cost?.total ?? estimatedCost,
+              imageUrls: result.imageUrls ?? [],
+              aspectRatio: selectedAspectRatio,
+              bridged: true,
+              ...(result.error ? { error: result.error } : {}),
+            };
+            next = [job, ...next].slice(0, MAX_RESULTS);
+          }
         }
       }
 
