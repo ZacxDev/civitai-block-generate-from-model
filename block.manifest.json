@@ -46,7 +46,7 @@
   },
   "iframe": {
     "src": "https://generate-from-model.civit.ai/",
-    "minHeight": 240,
+    "minHeight": 400,
     "maxHeight": 1600,
     "resizable": true,
     "sandbox": "allow-scripts allow-forms"
