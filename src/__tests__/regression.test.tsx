@@ -135,4 +135,24 @@ describe('Dark theme styling', () => {
     // border of its own — the host owns the chrome).
     expect(bg === '#ffffff' || bg === 'rgb(255, 255, 255)').toBe(true);
   });
+
+  it('sets data-theme on the root so the [data-theme="dark"] CSS rules apply', async () => {
+    // The carousel edge-fade ::after and the button/link/icon hover styles are
+    // pseudo-elements / CSS that can't be inline-styled, so they live in the
+    // injected <style> behind `[data-theme="dark"]`. The iframe is a separate
+    // document — the host can't set that attribute inside it — so the block
+    // root MUST set it itself, or those dark rules never match (the carousel
+    // showed a light-mode fade smear on the dark block).
+    setMockTheme('dark');
+    setMockContext({ theme: 'dark' });
+    const { container } = await renderApp(<App />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.getAttribute('data-theme')).toBe('dark');
+  });
+
+  it('sets data-theme="light" on the root in light mode', async () => {
+    const { container } = await renderApp(<App />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.getAttribute('data-theme')).toBe('light');
+  });
 });

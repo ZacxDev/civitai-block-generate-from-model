@@ -612,7 +612,7 @@ export function App() {
 
   if (!ready) {
     return (
-      <div ref={rootRef} style={outerContainerStyle(theme)}>
+      <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
         <div style={innerContainerStyle()}>
           <StyleSheet />
           <LoadingSkeleton theme={theme} />
@@ -624,7 +624,7 @@ export function App() {
   const model = asModelContext(context);
   if (!model) {
     return (
-      <div ref={rootRef} style={outerContainerStyle(theme)}>
+      <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
         <div style={innerContainerStyle()}>
           <p style={errorTextStyle}>
             This block expects a model-page slot. Current slot: <code>{context.slotId}</code>
@@ -636,7 +636,7 @@ export function App() {
 
   if (!viewer) {
     return (
-      <div ref={rootRef} style={outerContainerStyle(theme)}>
+      <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
         <div style={innerContainerStyle()}>
           <Header
             theme={theme}
@@ -652,7 +652,7 @@ export function App() {
 
   if (viewer.status === 'banned' || viewer.status === 'muted') {
     return (
-      <div ref={rootRef} style={outerContainerStyle(theme)}>
+      <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
         <div style={innerContainerStyle()}>
           <Header
             theme={theme}
@@ -823,7 +823,7 @@ export function App() {
     errMessage.includes('balance');
 
   return (
-    <div ref={rootRef} style={outerContainerStyle(theme)}>
+    <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
       <div style={innerContainerStyle()}>
         <StyleSheet />
         <Header
@@ -2415,7 +2415,10 @@ const MAX_PROMPT_HEIGHT = 120;
 // session can't grow unbounded.
 const MAX_RESULTS = 8;
 
-// --------- styles (inline; the host injects [data-theme]) ---------
+// --------- styles (inline; the block root sets data-theme={theme} so the
+// `[data-theme="dark"]` rules below — carousel fade, button/link/icon hovers —
+// actually match. The iframe is a separate document, so the HOST cannot inject
+// data-theme into it; the rootRef divs set it themselves.) ---------
 
 // The container is the block's content SURFACE only — background + text
 // colour. It deliberately draws NO border / radius / shadow: the host
