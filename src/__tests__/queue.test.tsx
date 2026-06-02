@@ -153,6 +153,46 @@ describe('Generation queue (task 3)', () => {
     });
   });
 
+  it('does NOT mint a 2nd card from a stale estimate result while a submitted job polls', async () => {
+    // Repro of the post-submit/post-poll duplicate: after submit,
+    // handleGenerate calls runEstimateNow(), which lands an estimate snapshot
+    // (unique whatif id, status 'pending') in the hook's shared `result`. The
+    // SDK poll loop then sets status='polling' BEFORE it overwrites `result`,
+    // so there's a render where status='polling' but `result` is the stale
+    // estimate — whose unique id no job owns. The bridge's create path used to
+    // mint a phantom in-flight card for it (a 2nd "Generating" card appeared
+    // after the first poll of every submit). The create path must only fire
+    // for TERMINAL results.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({ workflowId: 'wf_real', status: 'pending' } as never);
+    const pollGate = deferred<never>();
+    spies.poll.mockImplementation(() => pollGate.promise); // own job stays in flight
+
+    await renderApp(<App />);
+    const generate = () =>
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ });
+    await userEvent.click(generate());
+    await waitFor(() => expect(spies.submit).toHaveBeenCalledTimes(1));
+    // Exactly one in-flight card: the submitted job.
+    await waitFor(() => expect(screen.getAllByLabelText('Generating')).toHaveLength(1));
+
+    // Stale estimate snapshot lingering in `result` while status is 'polling'
+    // (a unique id owned by no job, non-terminal).
+    setMockWorkflow({
+      status: 'polling' as never,
+      result: { workflowId: 'wf_stale_estimate', status: 'pending' } as never,
+    });
+    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'x'); // re-render → bridge
+
+    // Still exactly ONE in-flight card — no phantom from the stale estimate id.
+    await waitFor(() => expect(screen.getAllByLabelText('Generating')).toHaveLength(1));
+    pollGate.resolve({
+      workflowId: 'wf_real',
+      status: 'succeeded',
+      imageUrls: ['https://example.test/done.jpg'],
+    } as never);
+  });
+
   it('each job polls + completes independently (different images land per job)', async () => {
     const spies = getMockSpies();
     let submitN = 0;

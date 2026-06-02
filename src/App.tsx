@@ -615,19 +615,30 @@ export function App() {
             );
           }
         } else if (result) {
-          // BUGFIX: don't mint a bridged card for `wfId` while a non-bridged
-          // submit is in flight without its workflowId yet. handleGenerate
-          // enqueues its job BEFORE submit() resolves (workflowId still null),
-          // and submit() updates the hook's shared `result` (carrying wfId) in
-          // a separate microtask from handleGenerate's patchJob that stamps the
-          // job. In that gap the bridge would see a wfId no job "owns" yet and
-          // create a DUPLICATE card — the extra one shows 0 Buzz and never
-          // resolves (the real poll loop runs on the original job). The
-          // pending own-submit is about to own this exact workflow, so skip.
-          const pendingOwnSubmit = next.some(
-            (j) => !j.bridged && j.workflowId == null && isJobInFlight(j.status)
+          // Don't CREATE a bridged card while the block already has its OWN
+          // in-flight job. When handleGenerate has a job running, that job's
+          // poll loop is what drives the shared status to 'polling' — but the
+          // shared `result` can belong to a DIFFERENT operation. Specifically:
+          //   - after submit, handleGenerate calls runEstimateNow(), which
+          //     lands an estimate snapshot (a unique whatif id, status
+          //     'pending') in `result`. The SDK poll loop then sets
+          //     status='polling' BEFORE it overwrites `result`, so there's a
+          //     render where status='polling' but `result` is the stale
+          //     estimate — its whatif id is owned by no job and used to mint a
+          //     phantom 2nd card after the first poll of every submit;
+          //   - the gotcha #52 race: an own submit whose workflowId hasn't been
+          //     stamped on its job yet (job still workflowId=null).
+          // In both the real workflow is (or will be) an own job, so creating
+          // here duplicates. The bridge's create path exists ONLY to surface a
+          // workflow the block did NOT submit (host/test injection) — which by
+          // definition means no own in-flight job is present. So: skip create
+          // whenever ANY non-bridged job is in flight (broadened from the old
+          // workflowId==null-only guard, which missed the post-submit case
+          // because the own job already carries its id by then).
+          const ownJobInFlight = next.some(
+            (j) => !j.bridged && isJobInFlight(j.status)
           );
-          if (!pendingOwnSubmit) {
+          if (!ownJobInFlight) {
             const job: QueueJob = {
               localId: nextLocalId(),
               workflowId: wfId,
