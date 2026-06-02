@@ -99,14 +99,6 @@ const JOB_TERMINAL: ReadonlySet<QueueJobStatus> = new Set([
   'canceled',
 ]);
 
-// Sentinel workflowId the host stamps on whatif/estimate snapshots (a cost-
-// only preview queues no real workflow, so the orchestrator returns no id).
-// MUST match `snapshotFromWorkflow`'s `workflow.id ?? 'whatif'` in civitai-web
-// (server/services/blocks/workflow.service.ts). The compatibility bridge uses
-// this to tell an estimate snapshot apart from a real submitted workflow so it
-// never mirrors an estimate into the queue as a phantom loading card.
-const ESTIMATE_WORKFLOW_ID = 'whatif';
-
 const isJobInFlight = (s: QueueJobStatus): boolean =>
   s === 'submitting' || s === 'pending' || s === 'processing';
 
@@ -579,14 +571,20 @@ export function App() {
   // mark it `bridged:false`, so the bridge never double-counts them
   // (matched by workflowId).
   useEffect(() => {
-    // Exclude the estimate sentinel: after the host estimate fix (a whatif
-    // snapshot now carries workflowId='whatif' instead of '' so the SDK
-    // validator accepts it), the hook leaves that estimate snapshot in
-    // `result` after every estimate(). Mirroring it would mint a phantom
-    // "pending" loading card on every showcase pick / re-quote. Only real
-    // submitted workflows have a non-sentinel id worth bridging.
-    const rawWfId = result?.workflowId;
-    const wfId = rawWfId === ESTIMATE_WORKFLOW_ID ? undefined : rawWfId;
+    // Skip estimate-originated results. estimate() ALSO lands a snapshot in
+    // the hook's shared `result` — and that snapshot carries a real, UNIQUE
+    // orchestrator workflowId (a whatif preview still gets a fresh id), so it
+    // is indistinguishable from a submitted workflow by id alone. The hook
+    // STATUS is the only reliable discriminator: estimate sets estimating |
+    // confirming; submit/poll/cancel set submitting | polling | done (and a
+    // host/test can surface a completed workflow via `result` while status is
+    // 'idle', so we must NOT require a submit status — only exclude estimate).
+    // Without this guard the bridge minted a brand-new phantom "pending" card
+    // on every estimate — i.e. every showcase pick / re-quote — because each
+    // estimate's unique id looked like a never-seen workflow.
+    if (status === 'estimating' || status === 'confirming') return;
+
+    const wfId = result?.workflowId;
     const sharedInFlight = status === 'submitting' || status === 'polling';
     const resultIsTerminal =
       !!result && JOB_TERMINAL.has(result.status as QueueJobStatus);
