@@ -488,6 +488,20 @@ export function App() {
     })
       .then((snap) => {
         if (myId !== estimateInFlightRef.current) return;
+        // A host-side estimate FAILURE comes back as a RESOLVED snapshot with
+        // status 'failed' + an error message — the host stamps a non-empty
+        // workflowId sentinel so the SDK validator DELIVERS it (an empty
+        // workflowId is dropped by the validator, which used to hang this
+        // request to the 120s transport timeout and leave the CTA stuck on its
+        // budget fallback with no explanation). The transport itself only
+        // rejects on timeout, so a failed estimate lands HERE, not in .catch.
+        if (snap.status === 'failed' || typeof snap.error === 'string') {
+          // eslint-disable-next-line no-console
+          console.warn('[gfm] estimate failed', { attempt: myId, error: snap.error });
+          setEstimateError(snap.error ?? 'estimate failed');
+          setEstimatedCost(null);
+          return;
+        }
         const cost = snap.cost?.total;
         // eslint-disable-next-line no-console
         console.debug('[gfm] estimate resolved', { attempt: myId, cost });

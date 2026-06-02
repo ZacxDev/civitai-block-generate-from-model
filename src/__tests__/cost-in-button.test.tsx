@@ -76,6 +76,31 @@ describe('Cost inside the Generate button (delta #1)', () => {
     expect(screen.getByText(/network down/)).toBeInTheDocument();
   });
 
+  it('surfaces a RESOLVED failed estimate snapshot (delivered host error) as an estimate error', async () => {
+    // Durable fix for the recurring "CTA buzz cost never updates" bug: the host
+    // stamps a non-empty workflowId on failure snapshots so the SDK validator
+    // DELIVERS them (an empty workflowId is dropped → the request hangs to the
+    // 120s timeout → the CTA sits on its budget fallback with no explanation).
+    // A delivered failure RESOLVES estimate() with status:'failed' + error (the
+    // transport only rejects on timeout), so the block must detect it in .then
+    // and surface it — not silently null the cost as if it just hadn't landed.
+    const { getMockSpies } = await import('../test/test-utils');
+    getMockSpies().estimate.mockReset();
+    getMockSpies().estimate.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'orchestrator unavailable',
+    } as never);
+    await renderApp(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn't estimate cost/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/orchestrator unavailable/)).toBeInTheDocument();
+    // CTA still renders an actionable fallback (≤ budget), not a numeric cost.
+    const btn = screen.getByRole('button', { name: /Generate Image/ });
+    expect(btn.textContent ?? '').toMatch(/Generate Image \(≤ \d+/);
+  });
+
   it('renders the Buzz bolt SVG icon inside the Generate button (Tier-4 Delta C)', async () => {
     await renderApp(<App />);
     // The bolt visually ties the action to the Buzz currency. JSDOM
