@@ -10,17 +10,17 @@
  *   - Dark-theme container background tracks the theme prop
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
   blocksReactMockFactory,
+  getMockSpies,
   renderApp,
   resetBlocksReactMock,
   setMockContext,
   setMockSettings,
   setMockTheme,
-  setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -64,19 +64,27 @@ describe('form stays interactive while a generation is in flight (task 2)', () =
   it('prompt, Generate, and thumbs are NOT disabled while a job polls', async () => {
     // Task 2: the blanket "busy → disabled" is gone. The queue (task 3)
     // makes submission non-blocking, so the user keeps editing + firing
-    // off more generations while earlier ones run. A shared in-flight
-    // workflow (mirrored into the queue via the bridge) must NOT lock the
-    // form.
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf', status: 'processing' } as never,
-    });
+    // off more generations while earlier ones run. Drive a REAL in-flight
+    // job (submit pending, poll never resolves) and verify the form stays
+    // interactive while that job is in flight.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({ workflowId: 'wf', status: 'pending' } as never);
+    spies.poll.mockImplementation(() => new Promise<never>(() => {})); // stays in flight
+
     await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument()
+    );
 
     expect(screen.getByLabelText('Prompt (optional)')).not.toBeDisabled();
-    // The CTA stays "Generate Image" (no Submitting/Generating takeover)
-    // and remains clickable — the per-job progress lives in the carousel.
-    expect(screen.getByRole('button', { name: /Generate Image/ })).not.toBeDisabled();
+    // The CTA stays a Generate/Re-generate action (no Submitting/Generating
+    // takeover) and remains clickable — per-job progress lives in the carousel.
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).not.toBeDisabled();
     // Carousel thumbs stay pickable.
     expect(screen.getByRole('button', { name: 'Pick preview 1' })).not.toBeDisabled();
     expect(screen.getByRole('button', { name: 'Pick preview 2' })).not.toBeDisabled();

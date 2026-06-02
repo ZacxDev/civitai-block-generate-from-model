@@ -25,7 +25,6 @@ import {
   getMockSpies,
   renderApp,
   resetBlocksReactMock,
-  setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -201,31 +200,24 @@ describe('Cancel an in-flight job (Feature 2)', () => {
   });
 
   it('cancel still works on an in-flight job with NO poll token (missing-token / remount edge)', async () => {
-    // A job minted by the shared-state bridge (host/test surfaces an
-    // in-flight workflow via useBuzzWorkflow's status/result, NOT via the
-    // block's own submit) has `workflowId: null` and therefore NEVER calls
-    // runJobPollLoop — so it has no entry in pollCancelRef. This is the
-    // exact "token is missing" shape (also what a remount produces: the ref
-    // is re-created and orphans the running loop's localId).
-    //
-    // Driving it: status 'polling' + a TERMINAL result is the bridge's
-    // "stale snapshot, new workflow in flight" branch → it mints a
-    // standalone in-flight card with workflowId null.
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_old', status: 'succeeded' } as never,
-    });
+    // A job still in 'submitting' (submit() hasn't resolved) has
+    // workflowId:null and has NEVER called runJobPollLoop — so it has no entry
+    // in pollCancelRef. This is the exact "token is missing" shape (also what a
+    // remount produces: the ref is re-created and orphans the running loop's
+    // localId). Cancel must not throw on the undefined token lookup and must
+    // still flip the slot to Canceled (the status patch runs unconditionally).
+    const spies = getMockSpies();
+    const submitGate = deferred<never>();
+    spies.submit.mockImplementation(() => submitGate.promise); // stays 'submitting'
 
     await renderApp(<App />);
+    await userEvent.click(generate());
 
-    // The bridged in-flight slot shows its status + a cancel control, with
-    // no poll token behind it.
+    // The in-flight slot shows a cancel control with no poll token behind it.
     const cancel = await screen.findByRole('button', {
       name: 'Cancel generation',
     });
 
-    // Cancel must not throw on the undefined token lookup and must still
-    // flip the slot to Canceled (the status patch runs unconditionally).
     await userEvent.click(cancel);
     await waitFor(() => expect(screen.getByText('Canceled')).toBeInTheDocument());
     expect(

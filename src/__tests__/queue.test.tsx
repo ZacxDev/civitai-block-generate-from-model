@@ -24,7 +24,6 @@ import {
   getMockSpies,
   renderApp,
   resetBlocksReactMock,
-  setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -80,89 +79,47 @@ describe('Generation queue (task 3)', () => {
     });
   });
 
-  it('a single submit makes exactly ONE card — the bridge does not duplicate it', async () => {
-    // Regression for the duplicate-card bug: handleGenerate enqueues its job
-    // BEFORE submit() resolves (workflowId still null), and the real
-    // useBuzzWorkflow.submit updates the hook's SHARED result (carrying the
-    // workflowId) in a separate microtask from handleGenerate's patchJob that
-    // stamps the job. In that gap the compatibility bridge used to see a
-    // workflowId no job "owned" yet and mint a SECOND, bridged card — the extra
-    // one showed 0 Buzz and never resolved. The guard must suppress it.
+  // ----------------------------------------------------------------------
+  // Queue-driver invariants (post-bridge-removal, 2026-06-01).
+  //
+  // The shared-state "compatibility bridge" useEffect was removed: the queue
+  // is now driven SOLELY by handleGenerate + per-job poll loops. The three
+  // phantom-card bugs the bridge caused (estimate mints a phantom; a stale
+  // estimate result mints a 2nd card mid-poll; a submit's shared-result race
+  // mints a duplicate) are now STRUCTURALLY impossible — nothing reads the
+  // hook's shared `result`/`status` into the queue. These tests assert the
+  // user-visible guarantees those regressions protected, driven via the REAL
+  // path, so the guarantees stay covered even though the bug mechanism is gone.
+  // ----------------------------------------------------------------------
+
+  it('calling estimate() (mount + showcase pick) adds NO queue card', async () => {
+    // estimate() fires on mount, on every showcase pick, and on cost-bearing
+    // override changes. None of these may surface a queue card — only an
+    // explicit Generate click does. (The pre-removal bridge minted a phantom
+    // "pending" card on every estimate because each estimate's unique whatif
+    // workflowId looked like a never-seen submitted workflow.)
     const spies = getMockSpies();
-    const submitGate = deferred<never>();
-    spies.submit.mockImplementation(() => submitGate.promise); // stays in flight
-    const pollGate = deferred<never>();
-    spies.poll.mockImplementation(() => pollGate.promise);
-
-    await renderApp(<App />);
-    const generate = () =>
-      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ });
-
-    await userEvent.click(generate());
-    await waitFor(() => expect(spies.submit).toHaveBeenCalledTimes(1));
-    // One in-flight card: the non-bridged submit job (workflowId still null).
-    expect(screen.getAllByLabelText('Generating')).toHaveLength(1);
-
-    // Now the hook's shared result gains a workflowId mid-flight (mimicking
-    // submit's setResult landing before patchJob), then a re-render drives the
-    // bridge to re-evaluate. The pending own-submit is about to own wf_race.
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_race', status: 'processing' } as never,
-    });
-    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'x'); // force re-render
-
-    // Still exactly ONE in-flight card — no bridged duplicate for wf_race.
-    await waitFor(() => {
-      expect(screen.getAllByLabelText('Generating')).toHaveLength(1);
-    });
-    // Allow the in-flight test to settle the hanging promises.
-    submitGate.resolve({ workflowId: 'wf_race', status: 'processing' } as never);
-  });
-
-  it('an estimate snapshot does NOT mint a phantom loading card (status-gated)', async () => {
-    // Regression: the real useBuzzWorkflow leaves the estimate snapshot in the
-    // shared `result` after every estimate() (fires on mount + every showcase
-    // pick + every cost-bearing override). That snapshot carries a real,
-    // UNIQUE orchestrator workflowId (a whatif preview still gets a fresh id),
-    // so the compatibility bridge — which keys off result.workflowId — used to
-    // mint a brand-new phantom "pending" card on every estimate. The bridge
-    // must gate on the hook STATUS ('confirming' = estimate, not a submit),
-    // since the workflowId value can't distinguish estimate from submit.
     await renderApp(<App />);
 
-    // Mimic the real SDK after estimate() resolves: result holds the estimate
-    // snapshot with a real unique id, status is 'confirming' (NOT in flight).
-    setMockWorkflow({
-      status: 'confirming' as never,
-      result: { workflowId: 'wf_estimate_unique_1', status: 'pending', cost: { total: 34 } } as never,
-    });
-    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'x'); // re-render → bridge re-runs
+    // Mount already ran the auto-estimate.
+    await waitFor(() => expect(spies.estimate).toHaveBeenCalled());
+    expect(screen.queryAllByLabelText('Generating')).toHaveLength(0);
+    expect(screen.queryByTestId('gfm-results-carousel')).not.toBeInTheDocument();
 
-    // A second estimate with a DIFFERENT unique id (next showcase pick) — the
-    // pre-fix bug minted a fresh card here precisely because the id was new.
-    setMockWorkflow({
-      status: 'confirming' as never,
-      result: { workflowId: 'wf_estimate_unique_2', status: 'pending', cost: { total: 41 } } as never,
-    });
-    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'y');
-
-    // Queue stays empty across both estimates — zero in-flight cards.
-    await waitFor(() => {
-      expect(screen.queryAllByLabelText('Generating')).toHaveLength(0);
-    });
+    // A showcase pick fires another estimate — still no card.
+    await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
+    await waitFor(() =>
+      expect(spies.estimate.mock.calls.length).toBeGreaterThan(1)
+    );
+    expect(screen.queryAllByLabelText('Generating')).toHaveLength(0);
+    expect(screen.queryByTestId('gfm-results-carousel')).not.toBeInTheDocument();
   });
 
-  it('does NOT mint a 2nd card from a stale estimate result while a submitted job polls', async () => {
-    // Repro of the post-submit/post-poll duplicate: after submit,
-    // handleGenerate calls runEstimateNow(), which lands an estimate snapshot
-    // (unique whatif id, status 'pending') in the hook's shared `result`. The
-    // SDK poll loop then sets status='polling' BEFORE it overwrites `result`,
-    // so there's a render where status='polling' but `result` is the stale
-    // estimate — whose unique id no job owns. The bridge's create path used to
-    // mint a phantom in-flight card for it (a 2nd "Generating" card appeared
-    // after the first poll of every submit). The create path must only fire
-    // for TERMINAL results.
+  it('a single submit that polls produces EXACTLY ONE card even while estimates fire concurrently', async () => {
+    // handleGenerate calls runEstimateNow() right after submit() resolves, so
+    // an estimate snapshot lands in the hook's shared `result` WHILE the job
+    // polls. With the bridge gone this can't mint a phantom: there is exactly
+    // one card the whole time, driven by the own job's poll loop.
     const spies = getMockSpies();
     spies.submit.mockResolvedValue({ workflowId: 'wf_real', status: 'pending' } as never);
     const pollGate = deferred<never>();
@@ -173,24 +130,50 @@ describe('Generation queue (task 3)', () => {
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ });
     await userEvent.click(generate());
     await waitFor(() => expect(spies.submit).toHaveBeenCalledTimes(1));
-    // Exactly one in-flight card: the submitted job.
+    // Exactly one in-flight card.
     await waitFor(() => expect(screen.getAllByLabelText('Generating')).toHaveLength(1));
 
-    // Stale estimate snapshot lingering in `result` while status is 'polling'
-    // (a unique id owned by no job, non-terminal).
-    setMockWorkflow({
-      status: 'polling' as never,
-      result: { workflowId: 'wf_stale_estimate', status: 'pending' } as never,
-    });
-    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'x'); // re-render → bridge
+    // Force several more estimates (showcase picks) while the job polls — none
+    // may add a second card.
+    await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Pick preview 3' }));
+    await userEvent.type(screen.getByLabelText('Prompt (optional)'), 'extra');
 
-    // Still exactly ONE in-flight card — no phantom from the stale estimate id.
+    // Still exactly ONE in-flight card — no phantom from any estimate.
     await waitFor(() => expect(screen.getAllByLabelText('Generating')).toHaveLength(1));
+    expect(screen.getAllByLabelText('Generating')).toHaveLength(1);
+
     pollGate.resolve({
       workflowId: 'wf_real',
       status: 'succeeded',
       imageUrls: ['https://example.test/done.jpg'],
     } as never);
+  });
+
+  it('two submits produce TWO independent cards (no merge, no duplicate)', async () => {
+    // Each Generate click mints its own job keyed by a fresh localId; two
+    // clicks → two distinct in-flight cards driven by two independent poll
+    // loops. The shared hook state plays no part.
+    const spies = getMockSpies();
+    let submitN = 0;
+    spies.submit.mockImplementation(() => {
+      submitN += 1;
+      return Promise.resolve({ workflowId: `wf_${submitN}`, status: 'pending' } as never);
+    });
+    const pollGate = deferred<never>();
+    spies.poll.mockImplementation(() => pollGate.promise); // both stay in flight
+
+    await renderApp(<App />);
+    const generate = () =>
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ });
+
+    await userEvent.click(generate());
+    await waitFor(() => expect(spies.submit).toHaveBeenCalledTimes(1));
+    await userEvent.click(generate());
+    await waitFor(() => expect(spies.submit).toHaveBeenCalledTimes(2));
+
+    // Exactly two in-flight cards — one per submit.
+    await waitFor(() => expect(screen.getAllByLabelText('Generating')).toHaveLength(2));
   });
 
   it('each job polls + completes independently (different images land per job)', async () => {

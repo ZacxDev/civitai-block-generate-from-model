@@ -12,10 +12,12 @@ import { screen, waitFor } from '@testing-library/react';
 
 import {
   blocksReactMockFactory,
+  generate,
+  getMockSpies,
   renderApp,
   resetBlocksReactMock,
-  setMockWorkflow,
 } from '../test/test-utils';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
 
@@ -101,21 +103,26 @@ describe('Cost inside the Generate button (delta #1)', () => {
 });
 
 describe('In-flight progress lives on the carousel card, not the CTA (queue model)', () => {
-  it('the CTA stays "Generate Image" while a job is in flight; the carousel LoadingCard shows "Generating · {cost}"', async () => {
+  it('the CTA stays a Generate action while a job is in flight; the carousel LoadingCard shows "Generating · {cost}"', async () => {
     // Task 2 + 3: the Generate button no longer takes over with a
     // "Generating · N" label during a generation (that would imply the
-    // form is blocked). The button stays "Generate Image · N" and
-    // clickable so the user can queue more; the per-job progress + sticky
-    // cost moves onto the carousel's shimmer LoadingCard.
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'processing' } as never,
-    });
+    // form is blocked). The button stays "Generate/Re-generate Image · N"
+    // and clickable so the user can queue more; the per-job progress +
+    // sticky cost moves onto the carousel's shimmer LoadingCard.
     await renderApp(<App />);
+    // Default estimate resolves cost 34 → estimatedCost=34 at click. submit()
+    // returns pending; poll() advances to 'processing' (in flight, non-terminal).
+    await generate(
+      { workflowId: 'wf_1', status: 'pending' },
+      { poll: { workflowId: 'wf_1', status: 'processing' } }
+    );
+    await waitFor(() => {
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument();
+    });
 
-    // The CTA is still the actionable Generate button.
+    // The CTA is still the actionable Generate/Re-generate button (with cost).
     expect(
-      screen.getByRole('button', { name: /Generate Image · \d+/ })
+      screen.getByRole('button', { name: /(Generate|Re-generate) Image · \d+/ })
     ).toBeInTheDocument();
     // The "Generating · N" sticky-cost copy is on the LoadingCard.
     const loading = screen.getByLabelText('Generating');
@@ -128,11 +135,16 @@ describe('In-flight progress lives on the carousel card, not the CTA (queue mode
   });
 
   it('shows the pulse element on the carousel LoadingCard when a job is in flight', async () => {
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+    // submit() hangs so the 'submitting' card stays on screen.
+    const spies = getMockSpies();
+    spies.submit.mockImplementation(() => new Promise<never>(() => {}));
     await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument();
+    });
     const loading = screen.getByLabelText('Generating');
     const pulses = loading.querySelectorAll('span[aria-hidden="true"]');
     expect(pulses.length).toBeGreaterThan(0);
@@ -140,17 +152,21 @@ describe('In-flight progress lives on the carousel card, not the CTA (queue mode
     expect(pulse.style.animation).toContain('gfm-pulse');
   });
 
-  it('does NOT show a "Queued…" status line ON THE CTA when result.status is pending', async () => {
+  it('does NOT show a "Queued…" status line ON THE CTA when a job is queued', async () => {
     // Tier-1 #2 is specifically about the GENERATE BUTTON: it must not get
-    // taken over by a polling-status line. v0.2.12 adds a "Queued" badge to
-    // the QUEUE SLOT (Feature 1 — status-labelled slots), which is expected
-    // and lives on the carousel card, NOT the CTA. So scope the assertion
-    // to the button rather than the whole document.
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+    // taken over by a polling-status line. The "Queued" badge lives on the
+    // QUEUE SLOT (Feature 1 — status-labelled slots) on the carousel card,
+    // NOT the CTA. So scope the assertion to the button.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({ workflowId: 'wf_1', status: 'pending' } as never);
+    spies.poll.mockImplementation(() => new Promise<never>(() => {})); // stay queued
     await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument();
+    });
     const cta = screen.getByRole('button', {
       name: /Generate Image|Re-generate Image/,
     });

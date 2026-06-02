@@ -84,12 +84,6 @@ type QueueJob = {
   imageUrls: string[];
   aspectRatio: string;
   error?: string;
-  // True when the job was created by the shared-state compatibility bridge
-  // (host/test surfaced a workflow through the hook's `result`/`status`)
-  // rather than by the block's own submit() path. The bridge advances
-  // these from shared state; real-submit jobs are driven by their own
-  // poll loop and ignore shared state.
-  bridged: boolean;
 };
 
 const JOB_TERMINAL: ReadonlySet<QueueJobStatus> = new Set([
@@ -248,9 +242,10 @@ export function App() {
   const cancelJob = useCallback(
     (localId: string, workflowId: string | null) => {
       // (1) Stop the poll loop. The token may be missing — a remount clears
-      // pollCancelRef while the loop's closure keeps running, or a bridged
-      // job never had a token. Guard the lookup and set cancelled only when
-      // present; the status patch below clears the card regardless.
+      // pollCancelRef while the loop's closure keeps running, or the job is
+      // still 'submitting' and never started a loop. Guard the lookup and set
+      // cancelled only when present; the status patch below clears the card
+      // regardless.
       const token = pollCancelRef.current.get(localId);
       if (token) token.cancelled = true;
       // (2) Real server-side cancel — only possible once the workflowId has
@@ -465,7 +460,7 @@ export function App() {
   // Skipped when `forceZeroBuzz` is checked — we're pretending to have
   // no buzz, so there's no point asking the orchestrator for a cost
   // estimate (and the user expects the topup CTA to show directly,
-  // not a separate "Couldn't estimate cost: …" error from the bridge).
+  // not a separate "Couldn't estimate cost: …" estimate error).
   const runEstimateNow = () => {
     if (forceZeroBuzz) return;
     const modelId = modelCtxRead.modelId;
@@ -561,125 +556,18 @@ export function App() {
     }
   }, [anyJobInFlight, queue.length]);
 
-  // Compatibility bridge: mirror the hook's SHARED workflow state into the
-  // queue for any workflow the queue doesn't already own via a real
-  // submit(). This keeps the carousel working when the host (or a test)
-  // surfaces a workflow through the hook's `result`/`status` directly,
-  // rather than through the block's own submit path — e.g. a cached
-  // succeeded snapshot returned synchronously, or an externally-injected
-  // in-flight state. Real submits add their own job in handleGenerate and
-  // mark it `bridged:false`, so the bridge never double-counts them
-  // (matched by workflowId).
-  useEffect(() => {
-    // Skip estimate-originated results. estimate() ALSO lands a snapshot in
-    // the hook's shared `result` — and that snapshot carries a real, UNIQUE
-    // orchestrator workflowId (a whatif preview still gets a fresh id), so it
-    // is indistinguishable from a submitted workflow by id alone. The hook
-    // STATUS is the only reliable discriminator: estimate sets estimating |
-    // confirming; submit/poll/cancel set submitting | polling | done (and a
-    // host/test can surface a completed workflow via `result` while status is
-    // 'idle', so we must NOT require a submit status — only exclude estimate).
-    // Without this guard the bridge minted a brand-new phantom "pending" card
-    // on every estimate — i.e. every showcase pick / re-quote — because each
-    // estimate's unique id looked like a never-seen workflow.
-    if (status === 'estimating' || status === 'confirming') return;
-
-    const wfId = result?.workflowId;
-    const sharedInFlight = status === 'submitting' || status === 'polling';
-    const resultIsTerminal =
-      !!result && JOB_TERMINAL.has(result.status as QueueJobStatus);
-    // Nothing to mirror unless the shared state describes a workflow.
-    if (!wfId && !sharedInFlight) return;
-
-    setQueue((prev) => {
-      let next = prev;
-
-      // (1) Mirror the `result` snapshot as its own job (keyed by
-      // workflowId), creating it if the queue doesn't already own it. This
-      // covers a host/test surfacing a completed (or in-progress) workflow
-      // directly through the hook's `result`.
-      if (wfId) {
-        const owned = next.find((j) => j.workflowId === wfId);
-        if (owned) {
-          if (owned.bridged && result) {
-            next = next.map((j) =>
-              j.localId === owned.localId
-                ? {
-                    ...j,
-                    status: result.status as QueueJobStatus,
-                    cost: result.cost?.total ?? j.cost,
-                    imageUrls: result.imageUrls ?? j.imageUrls,
-                    ...(result.error ? { error: result.error } : {}),
-                  }
-                : j
-            );
-          }
-        } else if (result) {
-          // Don't CREATE a bridged card while the block already has its OWN
-          // in-flight job. When handleGenerate has a job running, that job's
-          // poll loop is what drives the shared status to 'polling' — but the
-          // shared `result` can belong to a DIFFERENT operation. Specifically:
-          //   - after submit, handleGenerate calls runEstimateNow(), which
-          //     lands an estimate snapshot (a unique whatif id, status
-          //     'pending') in `result`. The SDK poll loop then sets
-          //     status='polling' BEFORE it overwrites `result`, so there's a
-          //     render where status='polling' but `result` is the stale
-          //     estimate — its whatif id is owned by no job and used to mint a
-          //     phantom 2nd card after the first poll of every submit;
-          //   - the gotcha #52 race: an own submit whose workflowId hasn't been
-          //     stamped on its job yet (job still workflowId=null).
-          // In both the real workflow is (or will be) an own job, so creating
-          // here duplicates. The bridge's create path exists ONLY to surface a
-          // workflow the block did NOT submit (host/test injection) — which by
-          // definition means no own in-flight job is present. So: skip create
-          // whenever ANY non-bridged job is in flight (broadened from the old
-          // workflowId==null-only guard, which missed the post-submit case
-          // because the own job already carries its id by then).
-          const ownJobInFlight = next.some(
-            (j) => !j.bridged && isJobInFlight(j.status)
-          );
-          if (!ownJobInFlight) {
-            const job: QueueJob = {
-              localId: nextLocalId(),
-              workflowId: wfId,
-              status: result.status as QueueJobStatus,
-              cost: result.cost?.total ?? estimatedCost,
-              imageUrls: result.imageUrls ?? [],
-              aspectRatio: selectedAspectRatio,
-              bridged: true,
-              ...(result.error ? { error: result.error } : {}),
-            };
-            next = [job, ...next].slice(0, MAX_RESULTS);
-          }
-        }
-      }
-
-      // (2) If the shared status says a workflow is in flight but the
-      // `result` we have is terminal (a STALE leftover from a prior
-      // workflow — the SDK keeps the last snapshot until the new one
-      // lands), the new in-flight workflow has no snapshot yet. Mint a
-      // standalone in-flight job for it — unless one is already running.
-      const needsInFlightCard =
-        sharedInFlight && (resultIsTerminal || !wfId);
-      if (needsInFlightCard && !next.some((j) => isJobInFlight(j.status))) {
-        const inFlightJob: QueueJob = {
-          localId: nextLocalId(),
-          workflowId: null,
-          status: status === 'submitting' ? 'submitting' : 'processing',
-          cost: estimatedCost,
-          imageUrls: [],
-          aspectRatio: selectedAspectRatio,
-          bridged: true,
-        };
-        next = [inFlightJob, ...next].slice(0, MAX_RESULTS);
-      }
-
-      return next;
-    });
-    // selectedAspectRatio / estimatedCost are read for the initial job
-    // shape only; we intentionally don't re-run when they change.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [status, result]);
+  // NOTE: the queue is driven SOLELY by handleGenerate (which mints an own
+  // job and starts its per-job poll loop) — see handleGenerate + runJobPollLoop
+  // below. There used to be a "compatibility bridge" useEffect here that
+  // mirrored the SDK hook's SHARED `result`/`status` into the queue so a
+  // host/test could surface a workflow without going through submit(). It was
+  // removed deliberately (2026-06-01): in production the block ALWAYS creates
+  // its own jobs via handleGenerate — the host never injects a workflow through
+  // the shared hook state — so the bridge's create path was test-only, and its
+  // keying off the shared `result`/`status` (which estimate() and poll()
+  // interleave writes to) caused three phantom-card bugs. The shared state is
+  // now read ONLY for the CTA cost estimate (runEstimateNow / estimatedCost)
+  // and the insufficient-Buzz error CTA — never for queue cards.
 
   if (!ready) {
     return (
@@ -839,7 +727,6 @@ export function App() {
           cost: estimatedCost,
           imageUrls: [],
           aspectRatio: selectedAspectRatio,
-          bridged: false,
         },
         ...prev,
       ].slice(0, MAX_RESULTS)
@@ -1615,7 +1502,7 @@ function ResultsCarousel({
   theme: string | null;
   modelName: string;
   // Live estimate fallback for an in-flight job that hasn't snapshotted a
-  // cost yet (e.g. a bridged job created before the estimate resolved).
+  // cost yet (e.g. a 'submitting' job created before submit() resolved).
   liveEstimatedCost: number | null;
   onOpenImage: (url: string) => void;
   // Cancel an in-flight job (client-side only — see cancelJob in App).

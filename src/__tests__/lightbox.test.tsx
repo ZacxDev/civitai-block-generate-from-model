@@ -10,14 +10,14 @@
  *   - does NOT close when the image itself is clicked (click-trap).
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
   blocksReactMockFactory,
+  generate,
   renderApp,
   resetBlocksReactMock,
-  setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -35,16 +35,26 @@ const SUCCEEDED_RESULT = {
   cost: { total: 34 },
 };
 
+// Drive one succeeded card via the real path (cached-hit terminal submit).
+async function generateSucceeded(): Promise<void> {
+  await generate(SUCCEEDED_RESULT);
+  await waitFor(() =>
+    expect(
+      screen.getByRole('button', { name: /View generation 1 full size/i })
+    ).toBeInTheDocument()
+  );
+}
+
 describe('Full-size image viewer (lightbox)', () => {
   it('has no dialog until a result image is clicked', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 
   it('opens the viewer with the full-size image when the result image is clicked', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
 
     await userEvent.click(
       screen.getByRole('button', { name: /View generation 1 full size/i })
@@ -57,8 +67,8 @@ describe('Full-size image viewer (lightbox)', () => {
   });
 
   it('closes the viewer when the backdrop is clicked', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
 
     await userEvent.click(
       screen.getByRole('button', { name: /View generation 1 full size/i })
@@ -68,8 +78,8 @@ describe('Full-size image viewer (lightbox)', () => {
   });
 
   it('closes the viewer on the explicit close button', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
 
     await userEvent.click(
       screen.getByRole('button', { name: /View generation 1 full size/i })
@@ -79,8 +89,8 @@ describe('Full-size image viewer (lightbox)', () => {
   });
 
   it('closes the viewer when Escape is pressed', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
 
     await userEvent.click(
       screen.getByRole('button', { name: /View generation 1 full size/i })
@@ -91,8 +101,8 @@ describe('Full-size image viewer (lightbox)', () => {
   });
 
   it('does NOT close when the full-size image itself is clicked', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
 
     await userEvent.click(
       screen.getByRole('button', { name: /View generation 1 full size/i })

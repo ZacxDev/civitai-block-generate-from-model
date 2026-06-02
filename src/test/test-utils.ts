@@ -13,8 +13,9 @@
  * rather than fighting the harness.
  */
 import type { ReactElement } from 'react';
-import { vi } from 'vitest';
-import { act, render } from '@testing-library/react';
+import { expect, vi } from 'vitest';
+import { act, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type {
   BlockCheckpointInfo,
   BlockSettings,
@@ -316,6 +317,39 @@ export async function renderApp(ui: ReactElement): Promise<ReturnType<typeof ren
     await Promise.resolve();
   });
   return utils;
+}
+
+/**
+ * Drive the queue through the REAL production path: shape the `submit` (and
+ * optionally `poll`) spy, click Generate, and wait for submit() to fire.
+ *
+ * This is the canonical way to surface a queue card in tests now that the
+ * shared-state compatibility bridge is gone — the block ONLY mints cards via
+ * handleGenerate + per-job poll loops.
+ *
+ * `submitSnapshot` is what submit() resolves to. Return it TERMINAL
+ * (status:'succeeded' + imageUrls) for the cached-hit path (no poll needed), or
+ * non-terminal (status:'pending') and pass `pollSnapshot` to drive the per-job
+ * poll loop. Pass `pollSnapshot: 'pending'` to keep the job in flight forever
+ * (a never-resolving poll), e.g. for loading-card assertions.
+ */
+export async function generate(
+  submitSnapshot: Partial<BlockWorkflowSnapshot>,
+  opts: { poll?: Partial<BlockWorkflowSnapshot> | 'pending' } = {}
+): Promise<void> {
+  const spies = getMockSpies();
+  spies.submit.mockResolvedValue(submitSnapshot as BlockWorkflowSnapshot);
+  if (opts.poll === 'pending') {
+    // Never resolves — the job stays in flight (loading card persists).
+    spies.poll.mockImplementation(() => new Promise<never>(() => {}));
+  } else if (opts.poll) {
+    spies.poll.mockResolvedValue(opts.poll as BlockWorkflowSnapshot);
+  }
+  const button = screen.getByRole('button', {
+    name: /Generate Image|Re-generate Image/,
+  });
+  await userEvent.click(button);
+  await waitFor(() => expect(spies.submit).toHaveBeenCalled());
 }
 
 /**

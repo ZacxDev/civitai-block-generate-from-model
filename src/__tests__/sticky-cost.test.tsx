@@ -14,9 +14,11 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 
 import {
   blocksReactMockFactory,
+  generate,
   getMockSpies,
   renderApp,
   resetBlocksReactMock,
@@ -33,14 +35,15 @@ beforeEach(() => {
 });
 
 describe('Sticky cost on the in-flight carousel LoadingCard', () => {
-  it('shows "Generating · {N}" on the LoadingCard when a job is polling AND estimate landed', async () => {
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+  it('shows "Generating · {N}" on the LoadingCard when a job is processing AND estimate landed', async () => {
+    // Default estimate mock resolves to cost.total = 34, so estimatedCost is
+    // 34 by the time Generate is clicked. submit() returns pending, poll()
+    // advances the job to 'processing' (in flight) but never terminal.
     await renderApp(<App />);
-    // Default estimate mock resolves to cost.total = 34. The bridged job's
-    // cost snapshots from the live estimate.
+    await generate(
+      { workflowId: 'wf_1', status: 'pending' },
+      { poll: { workflowId: 'wf_1', status: 'processing' } }
+    );
     await waitFor(() => {
       const loading = screen.getByLabelText('Generating');
       expect(loading.textContent ?? '').toMatch(/Generating · 34/);
@@ -48,11 +51,14 @@ describe('Sticky cost on the in-flight carousel LoadingCard', () => {
   });
 
   it('shows "Generating · {N}" on the LoadingCard when a job is submitting AND estimate landed', async () => {
-    setMockWorkflow({
-      status: 'submitting',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+    // The 'submitting' card lands the instant Generate is clicked, snapshotting
+    // the live estimatedCost (34) — submit() never resolves, holding it there.
+    const spies = getMockSpies();
+    spies.submit.mockImplementation(() => new Promise<never>(() => {}));
     await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
     await waitFor(() => {
       const loading = screen.getByLabelText('Generating');
       expect(loading.textContent ?? '').toMatch(/Generating · 34/);
@@ -60,16 +66,18 @@ describe('Sticky cost on the in-flight carousel LoadingCard', () => {
   });
 
   it('shows a cost-less "Generating" LoadingCard when no estimate has landed yet', async () => {
-    // Force the estimate to reject so estimatedCost stays null → the
-    // bridged job has no cost to snapshot.
-    getMockSpies().estimate.mockReset();
-    getMockSpies().estimate.mockRejectedValue(new Error('estimate offline'));
+    // Make the estimate never resolve BEFORE rendering so estimatedCost stays
+    // null → the in-flight job has no cost to snapshot. submit() also hangs so
+    // the 'submitting' card persists.
+    const spies = getMockSpies();
+    spies.estimate.mockReset();
+    spies.estimate.mockReturnValue(new Promise(() => {}));
+    spies.submit.mockImplementation(() => new Promise<never>(() => {}));
     setMockSettings({ buzz_budget_per_gen: 50 });
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
     await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
     await waitFor(() => {
       const loading = screen.getByLabelText('Generating');
       // "Generating" with no "· N" sticky cost.
@@ -79,16 +87,21 @@ describe('Sticky cost on the in-flight carousel LoadingCard', () => {
   });
 
   it('the CTA stays "Generate Image" (not Submitting/Generating) during an in-flight job', async () => {
-    setMockWorkflow({
-      status: 'submitting',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+    const spies = getMockSpies();
+    spies.submit.mockImplementation(() => new Promise<never>(() => {}));
     await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
     await waitFor(() => {
-      expect(
-        screen.getByRole('button', { name: /Generate Image/ })
-      ).toBeInTheDocument();
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument();
     });
+    // The CTA stays a Generate/Re-generate action (clicking once on the
+    // showcase flips it to "Re-generate Image") — it does NOT take over with
+    // a "Submitting"/"Generating" label while the job is in flight.
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Submitting/ })).not.toBeInTheDocument();
   });
 
