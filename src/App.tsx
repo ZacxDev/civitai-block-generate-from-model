@@ -453,6 +453,18 @@ export function App() {
   // next generation looks like; it shouldn't erase what they've already
   // made. Only path that clears pastResults today is component unmount.
 
+  // "Re-generate" detection. If the user already submitted THIS showcase
+  // (without switching since), the next Generate randomizes the seed (a fresh
+  // roll) — see handleGenerate. A randomized seed is a FRESH orchestrator job
+  // (full cost); the showcase's cached seed whatifs to 0 (a cache hit). So the
+  // cost ESTIMATE and the SUBMIT MUST share this exact decision, or the quoted
+  // CTA cost won't match what submit charges (the recurring "estimate shows 0
+  // but the 2nd gen charges Buzz" bug — the estimate was hardcoded to the
+  // cached seed). Defined here (above runEstimateNow) so both the estimate and
+  // its effect deps can read it.
+  const isRegenerate =
+    selectedShowcaseIdx != null && lastSubmittedShowcaseIdx === selectedShowcaseIdx;
+
   // Fire a single cost estimate against the current resolved params.
   // Recreated every render so it always closes over the latest prompt /
   // showcase / overrides; the effects below decide WHEN to call it.
@@ -461,12 +473,19 @@ export function App() {
   // no buzz, so there's no point asking the orchestrator for a cost
   // estimate (and the user expects the topup CTA to show directly,
   // not a separate "Couldn't estimate cost: …" estimate error).
-  const runEstimateNow = () => {
+  // `forceRandomizeSeed` overrides the seed-randomization decision for this
+  // one quote. handleGenerate passes `true` for its post-submit re-quote: the
+  // just-submitted showcase is now a re-gen, so the NEXT gen will randomize —
+  // but isRegenerate only flips on the following render, so the closure here is
+  // still stale. Effect/timer callers pass nothing → fall back to the live
+  // `randomizeSeedOnce || isRegenerate`.
+  const runEstimateNow = (forceRandomizeSeed?: boolean) => {
     if (forceZeroBuzz) return;
     const modelId = modelCtxRead.modelId;
     const modelVersionId = modelCtxRead.modelVersionId;
     if (!modelId || !modelVersionId) return;
     if (!effectiveCheckpointVersionIdForEstimate) return;
+    const randomizeSeed = forceRandomizeSeed ?? (randomizeSeedOnce || isRegenerate);
     // Race guard — if a faster query lands while a slower one is in
     // flight (or a debounced one fires late), only the latest result wins.
     const myId = ++estimateInFlightRef.current;
@@ -479,12 +498,14 @@ export function App() {
       kind: 'textToImage',
       modelId,
       modelVersionId,
-      // NOTE: estimate doesn't carry randomizeSeedOnce — that's a
-      // one-shot for submit only. The estimate uses the showcase's seed
-      // so cost-preview stays stable while the user is reviewing.
-      // Overrides flow through buildSubmitParams so the quoted cost
-      // matches the charged cost (same builder feeds submit()).
-      params: buildSubmitParams(prompt, '' /* suffix */, selectedShowcase, overrides, false),
+      // Mirror submit's seed-randomization decision EXACTLY (randomizeSeedOnce
+      // || isRegenerate — same expression handleGenerate uses) so the quoted
+      // cost matches what submit will charge. A randomized seed omits the seed
+      // → fresh orchestrator job → full cost; the cached showcase seed → cache
+      // hit → 0. Hardcoding `false` here quoted the cache-hit price (0) even
+      // when the next submit would randomize (re-gen / 🎲) and charge full
+      // price — the "CTA shows 0 but the gen charges Buzz" bug.
+      params: buildSubmitParams(prompt, '' /* suffix */, selectedShowcase, overrides, randomizeSeed),
     })
       .then((snap) => {
         if (myId !== estimateInFlightRef.current) return;
@@ -527,6 +548,12 @@ export function App() {
     effectiveCheckpointVersionIdForEstimate,
     selectedShowcaseIdx,
     forceZeroBuzz,
+    // Re-quote when the seed-randomization decision flips, so the CTA cost
+    // tracks what the NEXT submit will charge: isRegenerate flips true after
+    // the first submit of a showcase (→ next gen randomizes → full cost, not
+    // the cache-hit 0), and randomizeSeedOnce toggles with the 🎲 button.
+    isRegenerate,
+    randomizeSeedOnce,
   ]);
 
   // Debounced re-estimate on cost-bearing advanced overrides (width,
@@ -692,13 +719,9 @@ export function App() {
   // progress lives in the results carousel, not on the form.
   const isEstimating = status === 'estimating';
 
-  // Tier-3 #11: Re-generate semantics. If the user already submitted for
-  // THIS showcase (without switching since), the next Generate is treated
-  // as "Re-generate" — auto-arm the randomize-seed-once flag for this
-  // submission. The manual 🎲 button still works independently; this is
-  // an additional auto-arm path, not a replacement.
-  const isRegenerate =
-    selectedShowcaseIdx != null && lastSubmittedShowcaseIdx === selectedShowcaseIdx;
+  // `isRegenerate` (Tier-3 #11 re-generate semantics: auto-randomize the seed
+  // when the user re-Generates the same showcase) is defined above runEstimateNow
+  // so the cost estimate can mirror this submit's seed decision.
 
   const handleGenerate = async () => {
     // Debug short-circuit: when "Simulate 0 Buzz" is checked, skip the
@@ -772,10 +795,13 @@ export function App() {
       // Re-quote after the submit. The orchestrator prices dynamically — the
       // SAME params can cost differently between generations — so without
       // this the CTA stays frozen on the mount/param-change estimate and
-      // never reflects what the NEXT Generate click will actually cost. The
-      // race guard in runEstimateNow keeps the newest result if the user
-      // also edits a cost-bearing field while this is in flight.
-      runEstimateNow();
+      // never reflects what the NEXT Generate click will actually cost.
+      // Force randomizeSeed=true: the just-submitted showcase is now a re-gen,
+      // so the next gen WILL randomize the seed (fresh job → full cost, not the
+      // cache-hit 0). isRegenerate only flips on the next render, so this
+      // closure is still stale — pass the decision explicitly. The race guard
+      // keeps the newest result if the user also edits a cost-bearing field.
+      runEstimateNow(true);
     } catch (err) {
       // Mark this job failed; the rest of the queue is unaffected. The
       // insufficient-Buzz CTA path keys off the shared `error` separately.

@@ -215,4 +215,40 @@ describe('Cost re-estimate on advanced overrides', () => {
     expect(screen.queryByRole('button', { name: /· 34/ })).not.toBeInTheDocument();
     expect(spies.submit).toHaveBeenCalledTimes(1);
   });
+
+  it('re-quotes with the seed OMITTED once the showcase is a re-gen (estimate matches submit)', async () => {
+    // The recurring "estimate shows 0 but the gen charges Buzz" bug: the cost
+    // estimate was hardcoded to the showcase's CACHED seed (a cache hit → 0),
+    // but submit randomizes the seed on a re-gen (fresh job → full cost). The
+    // estimate must mirror submit's seed decision (randomizeSeedOnce ||
+    // isRegenerate). A randomized seed is sent by OMITTING the seed key.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({
+      workflowId: 'wf_1',
+      status: 'succeeded',
+      imageUrls: ['https://example.test/a.jpg'],
+      cost: { total: 12 },
+    } as never);
+    await renderApp(<App />);
+
+    // Before any submit: the latest estimate uses the showcase's cached seed
+    // (12345 from DEFAULT_SHOWCASES[0]) — the "rightfully 0" first-gen quote.
+    await waitFor(() => {
+      const last = spies.estimate.mock.calls.at(-1)![0] as { params: { seed?: number } };
+      expect(last.params.seed).toBe(12345);
+    });
+
+    // Generate once → this showcase is now "submitted" → the next Generate is a
+    // re-gen (randomized seed).
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+
+    // The re-quote now OMITS the seed (randomized → fresh job → full cost),
+    // matching what the next submit will actually charge.
+    await waitFor(() => {
+      const last = spies.estimate.mock.calls.at(-1)![0] as { params: Record<string, unknown> };
+      expect('seed' in last.params).toBe(false);
+    });
+  });
 });
