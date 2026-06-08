@@ -13,11 +13,13 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
+import { waitFor } from '@testing-library/react';
+
 import {
   blocksReactMockFactory,
+  generate,
   renderApp,
   resetBlocksReactMock,
-  setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -66,14 +68,21 @@ describe('Three-dots Advanced toggle (Tier-3 #3)', () => {
     expect(section).toHaveAttribute('aria-hidden', 'true');
   });
 
-  it('disables the three-dots while isBusy', async () => {
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+  it('keeps the three-dots enabled while a generation is in flight (task 2)', async () => {
+    // Task 2: nothing on the form disables during generation anymore —
+    // the user can open Advanced and tweak params for the next queued
+    // submit while earlier jobs are still polling. Drive a real in-flight
+    // job (submit pending, poll never resolves).
     await renderApp(<App />);
+    await generate(
+      { workflowId: 'wf_1', status: 'pending' },
+      { poll: 'pending' }
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument()
+    );
     const dots = screen.getByRole('button', { name: 'Advanced settings' });
-    expect(dots).toBeDisabled();
+    expect(dots).not.toBeDisabled();
   });
 
   it('does NOT render the old inline "⚙ Advanced" toggle row below the prompt', async () => {

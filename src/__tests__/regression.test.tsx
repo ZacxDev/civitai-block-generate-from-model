@@ -10,17 +10,17 @@
  *   - Dark-theme container background tracks the theme prop
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
   blocksReactMockFactory,
+  getMockSpies,
   renderApp,
   resetBlocksReactMock,
   setMockContext,
   setMockSettings,
   setMockTheme,
-  setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -60,20 +60,34 @@ describe('Randomize seed one-shot (advanced editable)', () => {
   });
 });
 
-describe('isBusy disables every interactive control', () => {
-  it('all primary controls are disabled while polling', async () => {
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf', status: 'processing' } as never,
-    });
-    await renderApp(<App />);
+describe('form stays interactive while a generation is in flight (task 2)', () => {
+  it('prompt, Generate, and thumbs are NOT disabled while a job polls', async () => {
+    // Task 2: the blanket "busy → disabled" is gone. The queue (task 3)
+    // makes submission non-blocking, so the user keeps editing + firing
+    // off more generations while earlier ones run. Drive a REAL in-flight
+    // job (submit pending, poll never resolves) and verify the form stays
+    // interactive while that job is in flight.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({ workflowId: 'wf', status: 'pending' } as never);
+    spies.poll.mockImplementation(() => new Promise<never>(() => {})); // stays in flight
 
-    expect(screen.getByLabelText('Prompt (optional)')).toBeDisabled();
-    // Tier-2 #8: polling label now includes sticky cost ("Generating · N Buzz").
-    expect(screen.getByRole('button', { name: /Generating/ })).toBeDisabled();
-    // Carousel thumbs.
-    expect(screen.getByRole('button', { name: 'Pick preview 1' })).toBeDisabled();
-    expect(screen.getByRole('button', { name: 'Pick preview 2' })).toBeDisabled();
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument()
+    );
+
+    expect(screen.getByLabelText('Prompt (optional)')).not.toBeDisabled();
+    // The CTA stays a Generate/Re-generate action (no Submitting/Generating
+    // takeover) and remains clickable — per-job progress lives in the carousel.
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).not.toBeDisabled();
+    // Carousel thumbs stay pickable.
+    expect(screen.getByRole('button', { name: 'Pick preview 1' })).not.toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Pick preview 2' })).not.toBeDisabled();
   });
 });
 
@@ -116,9 +130,29 @@ describe('Dark theme styling', () => {
     const { container } = await renderApp(<App />);
     const root = container.firstElementChild as HTMLElement;
     const bg = root.style.background.toLowerCase();
-    // Tier-3 #4: light surface bumped to pure white (#ffffff) so the
-    // 1px border + outset shadow read as a distinct card against the
-    // host page's tinted backgrounds.
+    // Light surface is pure white (#ffffff) so the block content reads
+    // cleanly inside the host's AppBlockChrome frame (the block draws no
+    // border of its own — the host owns the chrome).
     expect(bg === '#ffffff' || bg === 'rgb(255, 255, 255)').toBe(true);
+  });
+
+  it('sets data-theme on the root so the [data-theme="dark"] CSS rules apply', async () => {
+    // The carousel edge-fade ::after and the button/link/icon hover styles are
+    // pseudo-elements / CSS that can't be inline-styled, so they live in the
+    // injected <style> behind `[data-theme="dark"]`. The iframe is a separate
+    // document — the host can't set that attribute inside it — so the block
+    // root MUST set it itself, or those dark rules never match (the carousel
+    // showed a light-mode fade smear on the dark block).
+    setMockTheme('dark');
+    setMockContext({ theme: 'dark' });
+    const { container } = await renderApp(<App />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.getAttribute('data-theme')).toBe('dark');
+  });
+
+  it('sets data-theme="light" on the root in light mode', async () => {
+    const { container } = await renderApp(<App />);
+    const root = container.firstElementChild as HTMLElement;
+    expect(root.getAttribute('data-theme')).toBe('light');
   });
 });

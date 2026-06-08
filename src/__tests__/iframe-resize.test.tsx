@@ -71,14 +71,17 @@ describe('Iframe resize structural fix (Tier-4 Delta A)', () => {
     expect(inner.style.padding).toBe('16px');
   });
 
-  it('the outer container still has the visible border + background (just no padding)', async () => {
+  it('the outer container keeps the background surface but draws NO frame (host owns the border)', async () => {
     const { container } = await renderApp(<App />);
     const root = container.firstElementChild as HTMLElement;
-    // The visual surface (border + radius + bg) stays on the outer
-    // element since that's what the iframe is asked to size around.
+    // The content surface (bg + text colour) stays on the outer element,
+    // but the border / radius / shadow are gone — civitai-web's
+    // AppBlockChrome renders the trust frame around the iframe, so a
+    // border here would just double it.
     expect(root.style.background.toLowerCase()).toMatch(/#ffffff|rgb\(255, 255, 255\)/);
-    expect(root.style.border).toContain('1px solid');
-    expect(root.style.borderRadius).toBe('12px');
+    expect(root.style.border).toBe('');
+    expect(root.style.borderRadius).toBe('');
+    expect(root.style.boxShadow).toBe('');
   });
 
   it('the loading state preserves the same outer/inner shell shape', async () => {

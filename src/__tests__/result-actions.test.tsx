@@ -22,10 +22,10 @@ import userEvent from '@testing-library/user-event';
 
 import {
   blocksReactMockFactory,
+  generate,
   renderApp,
   resetBlocksReactMock,
   setMockContext,
-  setMockWorkflow,
 } from '../test/test-utils';
 import { deriveDownloadFilename } from '../App';
 
@@ -44,10 +44,22 @@ const SUCCEEDED_RESULT = {
   cost: { total: 34 },
 };
 
+// Drive a succeeded card via the REAL path: submit() resolves a TERMINAL
+// snapshot (cached-hit — handleGenerate skips the poll loop when the submit
+// snapshot is already terminal), so the card lands as a Download card.
+async function generateSucceeded(
+  result: Partial<typeof SUCCEEDED_RESULT> = SUCCEEDED_RESULT
+): Promise<void> {
+  await generate(result);
+  await waitFor(() =>
+    expect(screen.getAllByRole('button', { name: 'Download' }).length).toBeGreaterThan(0)
+  );
+}
+
 describe('Inline result actions (delta #7)', () => {
   it('renders Download button when the workflow has succeeded', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
     expect(screen.getByRole('button', { name: 'Download' })).toBeInTheDocument();
   });
 
@@ -57,8 +69,8 @@ describe('Inline result actions (delta #7)', () => {
 
 it('clicking Download fetches the image as a Blob and clicks an anchor with the derived filename', async () => {
     setMockContext({ modelName: 'Luna_arianaV3' });
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
 
     // Tier-3 #10: the new path is fetch → blob → anchor.click on a
     // blob: URL. JSDOM doesn't ship URL.createObjectURL so we stub the
@@ -126,8 +138,8 @@ it('clicking Download fetches the image as a Blob and clicks an anchor with the 
   });
 
   it('falls back to opening in a new tab if the fetch path fails (CORS-blocked, etc.)', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
 
     // Force fetch to reject so we exercise the catch-block fallback.
     const fetchSpy = vi
@@ -149,21 +161,38 @@ it('clicking Download fetches the image as a Blob and clicks an anchor with the 
     openSpy.mockRestore();
   });
 
-  it('does NOT render the carousel while status is polling (no prior success captured)', async () => {
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+  it('does NOT render a Download button while a job is still polling (no prior success captured)', async () => {
     await renderApp(<App />);
+    // submit() returns pending, poll() never resolves → the only card is an
+    // in-flight loading card, never a Download card.
+    await generate(
+      { workflowId: 'wf_1', status: 'pending' },
+      { poll: 'pending' }
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument()
+    );
     expect(screen.queryByRole('button', { name: 'Download' })).not.toBeInTheDocument();
   });
 
-  it('disables Download while a re-submission is in flight (a prior result is in the carousel)', async () => {
-    // Status='submitting' represents a re-generate mid-call. Result is
-    // still the prior success snapshot.
-    setMockWorkflow({ status: 'submitting', result: SUCCEEDED_RESULT as never });
+  it('keeps Download ENABLED on a completed card while a newer generation is in flight (task 2)', async () => {
+    // Task 2 + 3: completed results stay downloadable even while newer
+    // queued jobs are still running. The prior implementation disabled
+    // every Download on any busy state; the queue model makes each
+    // completed card independently actionable.
     await renderApp(<App />);
-    expect(screen.getByRole('button', { name: 'Download' })).toBeDisabled();
+    // First job completes (cached hit) → a Download card.
+    await generateSucceeded();
+    // Second job goes in flight (poll never resolves) — the prior Download
+    // card must stay enabled.
+    await generate(
+      { workflowId: 'wf_inflight', status: 'pending' },
+      { poll: 'pending' }
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument()
+    );
+    expect(screen.getByRole('button', { name: 'Download' })).not.toBeDisabled();
   });
 });
 
@@ -175,36 +204,30 @@ it('clicking Download fetches the image as a Blob and clicks an anchor with the 
  */
 describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => {
   it('a single succeeded result renders exactly one card', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
     // Each card has its own Download button (aria-label).
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
   });
 
   it('two successive succeeded results render TWO cards, newest first', async () => {
-    // First result lands at mount.
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
-    const { rerender } = await renderApp(<App />);
+    await renderApp(<App />);
+    // First job completes (cached hit).
+    await generateSucceeded(SUCCEEDED_RESULT);
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
 
-    // Second result lands (simulate a new workflow completing).
-    const SECOND_RESULT = {
+    // Second job completes with a distinct workflowId + image.
+    await generateSucceeded({
       workflowId: 'wf_done_2',
-      status: 'succeeded' as const,
+      status: 'succeeded',
       imageUrls: ['https://example.test/result-2.jpg'],
       cost: { total: 22 },
-    };
-    setMockWorkflow({ status: 'idle', result: SECOND_RESULT as never });
-    await import('react').then(async ({ act }) => {
-      await act(async () => {
-        rerender(<App />);
-        await Promise.resolve();
-      });
     });
 
     // Two cards now — both with Download buttons.
-    const downloads = screen.getAllByRole('button', { name: 'Download' });
-    expect(downloads).toHaveLength(2);
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(2)
+    );
 
     // Newest at the front: the carousel's first <img> is the second
     // result's URL. The result image cards have alt text like
@@ -221,8 +244,8 @@ describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => 
     // should just change what the NEXT generation looks like, not erase
     // what's already been made. The carousel is the user's session-long
     // exploration record.
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
     await renderApp(<App />);
+    await generateSucceeded();
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
 
     // Switch showcase — the prior result must remain visible.
@@ -233,31 +256,22 @@ describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => 
   });
 
   it('caps the carousel at MAX_RESULTS=8 with FIFO eviction (oldest goes first)', async () => {
-    // Start with one result, then push 8 more — total 9 unique
-    // workflowIds. After eviction the array must hold 8 with the
-    // oldest (workflowId 'wf_done_0') gone.
-    const makeResult = (i: number) => ({
-      workflowId: `wf_done_${i}`,
-      status: 'succeeded' as const,
-      imageUrls: [`https://example.test/result-${i}.jpg`],
-      cost: { total: i },
-    });
-
-    setMockWorkflow({ status: 'idle', result: makeResult(0) as never });
-    const { rerender } = await renderApp(<App />);
-
-    const { act } = await import('react');
-    for (let i = 1; i <= 8; i += 1) {
-      setMockWorkflow({ status: 'idle', result: makeResult(i) as never });
-      await act(async () => {
-        rerender(<App />);
-        await Promise.resolve();
+    // Fire 9 generations (each a distinct cached-hit workflowId). After
+    // eviction the carousel must hold 8 with the oldest (#0) gone.
+    await renderApp(<App />);
+    for (let i = 0; i <= 8; i += 1) {
+      await generateSucceeded({
+        workflowId: `wf_done_${i}`,
+        status: 'succeeded',
+        imageUrls: [`https://example.test/result-${i}.jpg`],
+        cost: { total: i },
       });
     }
 
     // Exactly 8 cards (cap), oldest (`result-0.jpg`) evicted.
-    const downloads = screen.getAllByRole('button', { name: 'Download' });
-    expect(downloads).toHaveLength(8);
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(8)
+    );
 
     const carousel = screen.getByTestId('gfm-results-carousel');
     const imgs = Array.from(carousel.querySelectorAll('img'));
@@ -271,29 +285,27 @@ describe('Results carousel — accumulation + eviction (Tier-4 Delta B)', () => 
   });
 
   it('accumulated cards stay visible while a new submission is in flight', async () => {
-    setMockWorkflow({ status: 'idle', result: SUCCEEDED_RESULT as never });
-    const { rerender } = await renderApp(<App />);
-
-    const SECOND_RESULT = {
+    await renderApp(<App />);
+    // Two completed cards.
+    await generateSucceeded(SUCCEEDED_RESULT);
+    await generateSucceeded({
       workflowId: 'wf_done_2',
-      status: 'succeeded' as const,
+      status: 'succeeded',
       imageUrls: ['https://example.test/result-2.jpg'],
       cost: { total: 22 },
-    };
-    setMockWorkflow({ status: 'idle', result: SECOND_RESULT as never });
-    const { act } = await import('react');
-    await act(async () => {
-      rerender(<App />);
-      await Promise.resolve();
     });
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(2)
+    );
 
     // Start a third submission (mid-flight) — the 2 prior cards stay.
-    setMockWorkflow({ status: 'submitting', result: SECOND_RESULT as never });
-    await act(async () => {
-      rerender(<App />);
-      await Promise.resolve();
-    });
-
+    await generate(
+      { workflowId: 'wf_inflight', status: 'pending' },
+      { poll: 'pending' }
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument()
+    );
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(2);
   });
 });

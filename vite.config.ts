@@ -7,10 +7,13 @@ import react from '@vitejs/plugin-react';
 // a single static bundle to be served from `iframe.src` in the manifest.
 export default defineConfig({
   plugins: [react()],
-  // Bundle is served under /generate-from-model/ in production — see
-  // block.manifest.json's iframe.src. Asset URLs must include this base
-  // or they'll 404 inside the iframe.
-  base: '/generate-from-model/',
+  // Per-app subdomain (generate-from-model.civit.ai) under W12 — bundle
+  // serves at root, no path prefix. Pre-W12 (hackathon block-host pattern
+  // /generate-from-model/) required base = '/generate-from-model/', which
+  // broke under the per-subdomain model: nginx redirected / → the prefix
+  // and the redirect Location used the in-pod port:scheme (HTTP:8080),
+  // causing a mixed-content block on the HTTPS iframe.
+  base: '/',
   server: {
     // The starter dev harness simulates BLOCK_INIT from the same origin —
     // strict-port avoids the harness allowlist drifting when 5173 is busy.

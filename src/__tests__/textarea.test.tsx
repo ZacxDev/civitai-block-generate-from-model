@@ -104,7 +104,10 @@ describe('Prompt textarea (Tier-3 #9)', () => {
     expect(field.value).toContain('\n');
   });
 
-  it('does NOT submit on Ctrl+Enter while disabled (busy state)', async () => {
+  it('DOES submit on Ctrl+Enter while another generation is in flight (task 2)', async () => {
+    // Task 2 + 3: the textarea no longer disables during generation, and
+    // submissions queue — so Ctrl+Enter while an earlier job is still
+    // polling enqueues a new one rather than being swallowed.
     const { setMockWorkflow } = await import('../test/test-utils');
     setMockWorkflow({
       status: 'polling',
@@ -118,6 +121,6 @@ describe('Prompt textarea (Tier-3 #9)', () => {
     fireEvent.keyDown(field, { key: 'Enter', ctrlKey: true });
     await Promise.resolve();
 
-    expect(spies.submit).not.toHaveBeenCalled();
+    expect(spies.submit).toHaveBeenCalled();
   });
 });

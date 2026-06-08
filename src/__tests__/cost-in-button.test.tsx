@@ -12,10 +12,12 @@ import { screen, waitFor } from '@testing-library/react';
 
 import {
   blocksReactMockFactory,
+  generate,
+  getMockSpies,
   renderApp,
   resetBlocksReactMock,
-  setMockWorkflow,
 } from '../test/test-utils';
+import userEvent from '@testing-library/user-event';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
 
@@ -74,6 +76,31 @@ describe('Cost inside the Generate button (delta #1)', () => {
     expect(screen.getByText(/network down/)).toBeInTheDocument();
   });
 
+  it('surfaces a RESOLVED failed estimate snapshot (delivered host error) as an estimate error', async () => {
+    // Durable fix for the recurring "CTA buzz cost never updates" bug: the host
+    // stamps a non-empty workflowId on failure snapshots so the SDK validator
+    // DELIVERS them (an empty workflowId is dropped → the request hangs to the
+    // 120s timeout → the CTA sits on its budget fallback with no explanation).
+    // A delivered failure RESOLVES estimate() with status:'failed' + error (the
+    // transport only rejects on timeout), so the block must detect it in .then
+    // and surface it — not silently null the cost as if it just hadn't landed.
+    const { getMockSpies } = await import('../test/test-utils');
+    getMockSpies().estimate.mockReset();
+    getMockSpies().estimate.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'orchestrator unavailable',
+    } as never);
+    await renderApp(<App />);
+    await waitFor(() => {
+      expect(screen.getByText(/Couldn't estimate cost/)).toBeInTheDocument();
+    });
+    expect(screen.getByText(/orchestrator unavailable/)).toBeInTheDocument();
+    // CTA still renders an actionable fallback (≤ budget), not a numeric cost.
+    const btn = screen.getByRole('button', { name: /Generate Image/ });
+    expect(btn.textContent ?? '').toMatch(/Generate Image \(≤ \d+/);
+  });
+
   it('renders the Buzz bolt SVG icon inside the Generate button (Tier-4 Delta C)', async () => {
     await renderApp(<App />);
     // The bolt visually ties the action to the Buzz currency. JSDOM
@@ -100,51 +127,74 @@ describe('Cost inside the Generate button (delta #1)', () => {
   });
 });
 
-describe('No standalone polling status line (delta #2)', () => {
-  it('shows "Generating · {cost} Buzz" inside the button and NO separate paragraph', async () => {
-    // Tier-2 #8 update: the polling label now keeps the cost visible
-    // (was just "Generating…"). The "no standalone paragraph" assertion
-    // still holds — the button is the single source of truth.
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'processing' } as never,
-    });
+describe('In-flight progress lives on the carousel card, not the CTA (queue model)', () => {
+  it('the CTA stays a Generate action while a job is in flight; the carousel LoadingCard shows "Generating · {cost}"', async () => {
+    // Task 2 + 3: the Generate button no longer takes over with a
+    // "Generating · N" label during a generation (that would imply the
+    // form is blocked). The button stays "Generate/Re-generate Image · N"
+    // and clickable so the user can queue more; the per-job progress +
+    // sticky cost moves onto the carousel's shimmer LoadingCard.
     await renderApp(<App />);
-    // Button picks up the busy label with the sticky cost.
-    const btn = screen.getByRole('button', { name: /Generating · \d+/ });
-    expect(btn).toBeInTheDocument();
-    expect(btn.textContent ?? '').toMatch(/Generating · \d+/);
-    // There is no <p>Queued…</p> / <p>Generating…</p> sibling. To verify,
-    // make sure the ONLY node containing the "Generating · N Buzz" form
-    // is inside the button. (Note: "Generating with:" in the Advanced
-    // section is unrelated copy and uses a different shape.)
-    const generatingNodes = screen.getAllByText(/Generating · \d+/);
-    expect(generatingNodes).toHaveLength(1);
-    expect(btn.contains(generatingNodes[0]!)).toBe(true);
+    // Default estimate resolves cost 34 → estimatedCost=34 at click. submit()
+    // returns pending; poll() advances to 'processing' (in flight, non-terminal).
+    await generate(
+      { workflowId: 'wf_1', status: 'pending' },
+      { poll: { workflowId: 'wf_1', status: 'processing' } }
+    );
+    await waitFor(() => {
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument();
+    });
+
+    // The CTA is still the actionable Generate/Re-generate button (with cost).
+    expect(
+      screen.getByRole('button', { name: /(Generate|Re-generate) Image · \d+/ })
+    ).toBeInTheDocument();
+    // The "Generating · N" sticky-cost copy is on the LoadingCard.
+    const loading = screen.getByLabelText('Generating');
+    expect(loading.textContent ?? '').toMatch(/Generating · \d+/);
+    // And there's exactly one "Generating · N" node (no duplicate on the
+    // button + no standalone paragraph).
+    const generatingNodes = screen.getAllByText(/Generating/);
+    // Exactly one card carries the "Generating · N" sticky cost.
+    expect(generatingNodes.some((n) => /Generating · \d+/.test(n.textContent ?? ''))).toBe(true);
   });
 
-  it('shows the pulse element on the button when polling', async () => {
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+  it('shows the pulse element on the carousel LoadingCard when a job is in flight', async () => {
+    // submit() hangs so the 'submitting' card stays on screen.
+    const spies = getMockSpies();
+    spies.submit.mockImplementation(() => new Promise<never>(() => {}));
     await renderApp(<App />);
-    const btn = screen.getByRole('button', { name: /Generating/ });
-    // The Pulse renders as an aria-hidden <span> with the gfm-pulse
-    // animation. Locate it by attribute — it's the busy-state visual.
-    const pulses = btn.querySelectorAll('span[aria-hidden="true"]');
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument();
+    });
+    const loading = screen.getByLabelText('Generating');
+    const pulses = loading.querySelectorAll('span[aria-hidden="true"]');
     expect(pulses.length).toBeGreaterThan(0);
-    // Confirm it's the animated pulse (style.animation includes gfm-pulse).
     const pulse = pulses[0] as HTMLElement;
     expect(pulse.style.animation).toContain('gfm-pulse');
   });
 
-  it('does NOT show "Queued…" anywhere even when result.status is pending', async () => {
-    setMockWorkflow({
-      status: 'polling',
-      result: { workflowId: 'wf_1', status: 'pending' } as never,
-    });
+  it('does NOT show a "Queued…" status line ON THE CTA when a job is queued', async () => {
+    // Tier-1 #2 is specifically about the GENERATE BUTTON: it must not get
+    // taken over by a polling-status line. The "Queued" badge lives on the
+    // QUEUE SLOT (Feature 1 — status-labelled slots) on the carousel card,
+    // NOT the CTA. So scope the assertion to the button.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({ workflowId: 'wf_1', status: 'pending' } as never);
+    spies.poll.mockImplementation(() => new Promise<never>(() => {})); // stay queued
     await renderApp(<App />);
-    expect(screen.queryByText(/Queued/)).not.toBeInTheDocument();
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByLabelText('Generating')).toBeInTheDocument();
+    });
+    const cta = screen.getByRole('button', {
+      name: /Generate Image|Re-generate Image/,
+    });
+    expect(cta.textContent ?? '').not.toMatch(/Queued/);
   });
 });
