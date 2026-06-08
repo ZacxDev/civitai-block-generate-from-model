@@ -135,6 +135,45 @@ function nextLocalId(): string {
   return `job-${queueJobSeq}-${Date.now()}`;
 }
 
+/**
+ * Anonymous conversion. Resolve the parent (embedding page) origin to use as
+ * the postMessage targetOrigin for REQUEST_SIGN_IN. We prefer the embedding
+ * page's origin (from `document.referrer`) so the message is targeted, never
+ * broadcast. Falls back to `'*'` only when the referrer is unavailable — the
+ * REQUEST_SIGN_IN message carries no secret (it asks the host to open its own
+ * login UI), and the host independently validates origin + event.source before
+ * acting, so a broadcast can't be weaponised.
+ */
+export function resolveParentOrigin(referrer: string | undefined): string {
+  if (referrer) {
+    try {
+      return new URL(referrer).origin;
+    } catch {
+      /* fall through */
+    }
+  }
+  return '*';
+}
+
+/**
+ * Raw postMessage of the SDK REQUEST_SIGN_IN envelope. Deliberately NOT routed
+ * through an SDK hook so this works without waiting on a `@civitai/blocks-react`
+ * npm publish (the new `useRequestSignIn` helper produces the identical wire
+ * message). The host's IframeHost honors this only after BLOCK_READY and from
+ * the pinned origin. `returnUrl` is optional; the host defaults it to the
+ * current page and sanitises it to a same-origin path.
+ */
+export function postRequestSignIn(payload?: { returnUrl?: string }): void {
+  if (typeof window === 'undefined' || !window.parent) return;
+  const targetOrigin = resolveParentOrigin(
+    typeof document !== 'undefined' ? document.referrer : undefined
+  );
+  window.parent.postMessage(
+    { type: 'REQUEST_SIGN_IN', ...(payload ? { payload } : {}) },
+    targetOrigin
+  );
+}
+
 export function App() {
   const { ready, context, viewer, theme, blockInstanceId } = useBlockContext();
   const settings = useBlockSettings();
@@ -481,6 +520,9 @@ export function App() {
   // `randomizeSeedOnce || isRegenerate`.
   const runEstimateNow = (forceRandomizeSeed?: boolean) => {
     if (forceZeroBuzz) return;
+    // Anon viewers carry no budget scope — an estimate would error. Skip it;
+    // the CTA shows "Sign in to generate" rather than a cost for anon.
+    if (!viewer) return;
     const modelId = modelCtxRead.modelId;
     const modelVersionId = modelCtxRead.modelVersionId;
     if (!modelId || !modelVersionId) return;
@@ -634,23 +676,17 @@ export function App() {
     );
   }
 
-  if (!viewer) {
-    return (
-      <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
-        <div style={innerContainerStyle()}>
-          <Header
-            theme={theme}
-            advancedOpen={advancedOpen}
-            onToggleAdvanced={() => setAdvancedOpen((v) => !v)}
-            isBusy={true}
-          />
-          <p style={subtleStyle}>Sign in to generate.</p>
-        </div>
-      </div>
-    );
-  }
+  // Anonymous conversion: a logged-out viewer (viewer === null) sees the FULL
+  // block — showcase carousel + prompt form are driven by the scope-free
+  // BLOCK_INIT context, so nothing here needs auth. The cost estimate is skipped
+  // (no budget scope → it would error), and Generate becomes a "Sign in to
+  // generate" affordance that posts REQUEST_SIGN_IN to the host instead of
+  // submitting a workflow. So we do NOT early-return here — fall through to the
+  // main render. The banned/muted gate below only applies to authenticated
+  // viewers.
+  const isAnon = !viewer;
 
-  if (viewer.status === 'banned' || viewer.status === 'muted') {
+  if (viewer && (viewer.status === 'banned' || viewer.status === 'muted')) {
     return (
       <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
         <div style={innerContainerStyle()}>
@@ -724,6 +760,15 @@ export function App() {
   // so the cost estimate can mirror this submit's seed decision.
 
   const handleGenerate = async () => {
+    // Anonymous conversion: a logged-out viewer who clicks Generate is prompted
+    // to sign in (the host opens civitai's login flow) instead of submitting a
+    // workflow. No estimate/submit happens — Generate stays server-gated anyway
+    // (the anon token carries no budget scope), so converting the click into a
+    // sign-in prompt is both the UX and the only path that can actually generate.
+    if (!viewer) {
+      postRequestSignIn();
+      return;
+    }
     // Debug short-circuit: when "Simulate 0 Buzz" is checked, skip the
     // real submit and synthesize the insufficient-Buzz state. The
     // existing error block renders the top-up CTA, which still opens
@@ -921,12 +966,27 @@ export function App() {
             <span>Simulate 0 Buzz (test top-up)</span>
           </label>
 
-          {/* Proactive top-up surface: when forceZeroBuzz is checked OR a
+          {/* Anonymous conversion: a logged-out viewer sees a "Sign in to
+              generate" CTA. Clicking it asks the host to open civitai's login
+              flow (handleGenerate posts REQUEST_SIGN_IN for anon). Highest
+              priority — anon never sees the Top-Up or cost CTAs. */}
+          {isAnon ? (
+            <button
+              type="button"
+              onClick={handleGenerate}
+              className="gfm-primary"
+              style={primaryButtonStyle(false)}
+              data-testid="gfm-signin-cta"
+            >
+              <span>Sign in to generate</span>
+              <BoltIcon />
+            </button>
+          ) : /* Proactive top-up surface: when forceZeroBuzz is checked OR a
               previous estimate/submit hit an insufficient-buzz error, swap
               the Generate button for the Top-Up CTA so the user never has
               to click a doomed Generate to discover they're short. The
-              error block below renders the EXPLANATORY copy under it. */}
-          {(forceZeroBuzz || isInsufficient || simulatedInsufficient) ? (
+              error block below renders the EXPLANATORY copy under it. */
+          (forceZeroBuzz || isInsufficient || simulatedInsufficient) ? (
             <button
               type="button"
               onClick={() => openPurchaseModal(budget * 10)}
