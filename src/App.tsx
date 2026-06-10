@@ -240,10 +240,26 @@ export function App() {
   // host consent prompt rather than a submit. Anon is handled first everywhere,
   // so this only applies to authenticated viewers.
   const needsConsent = !!viewer && !scopes.includes(GENERATE_SCOPE);
-  // Set true when a Generate click is deferred behind a consent prompt; an
+  // Set true when a Generate click is deferred behind a consent prompt; the
   // effect below fires the real submit once the scope lands (post-grant token
   // refresh), so the user's single click "just works" after they approve.
   const [pendingConsentGenerate, setPendingConsentGenerate] = useState(false);
+  // Latest handleGenerate in a ref so the consent-retry effect can re-fire it
+  // without re-subscribing every render (handleGenerate is a fresh closure each
+  // render). Declared HERE (before the early returns below) so hook order stays
+  // stable; `.current` is assigned after handleGenerate is defined. Mirrors the
+  // pollRef pattern. Typed loosely since handleGenerate isn't in scope yet.
+  const handleGenerateRef = useRef<() => void | Promise<void>>(() => {});
+  // Lazy-consent retry: once the viewer grants consent, the host re-mints and
+  // pushes the new token; `scopes` gains GENERATE_SCOPE so `needsConsent` flips
+  // false. If a Generate click was deferred behind that consent, fire it now —
+  // the user approved once and the generation proceeds without a second click.
+  useEffect(() => {
+    if (pendingConsentGenerate && !needsConsent) {
+      setPendingConsentGenerate(false);
+      void handleGenerateRef.current();
+    }
+  }, [pendingConsentGenerate, needsConsent]);
 
   const [prompt, setPrompt] = useState('');
   // User-edited overrides to the selected showcase's params. See type
@@ -924,21 +940,11 @@ export function App() {
     }
   };
 
-  // Latest handleGenerate in a ref so the consent-retry effect can re-fire it
-  // without re-subscribing every render (handleGenerate is a fresh closure each
-  // render). Mirrors the pollRef pattern above.
-  const handleGenerateRef = useRef(handleGenerate);
+  // Keep the consent-retry ref pointing at the latest handleGenerate closure.
+  // The useRef + retry useEffect are declared up top (with the other hooks,
+  // BEFORE the early returns) so hook order is stable; only this plain
+  // assignment lives here, after handleGenerate is defined.
   handleGenerateRef.current = handleGenerate;
-  // Lazy-consent retry: once the viewer grants consent, the host re-mints and
-  // pushes the new token; `scopes` gains GENERATE_SCOPE so `needsConsent` flips
-  // false. If a Generate click was deferred behind that consent, fire it now —
-  // the user approved once and the generation proceeds without a second click.
-  useEffect(() => {
-    if (pendingConsentGenerate && !needsConsent) {
-      setPendingConsentGenerate(false);
-      void handleGenerateRef.current();
-    }
-  }, [pendingConsentGenerate, needsConsent]);
 
   // The platform returns Buzz-budget rejection as a workflow `error` snapshot
   // or via the `error` ref. Sniff for budget/insufficient-funds language to

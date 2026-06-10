@@ -197,6 +197,13 @@ export function setMockScopes(scopes: string[]): void {
   state.scopes = scopes;
 }
 
+/** Toggle the BLOCK_INIT-ready state. `false` exercises the App's early
+ *  "not ready" return — useful for asserting hook order is stable across the
+ *  not-ready → ready transition (rules-of-hooks regression guard). */
+export function setMockReady(ready: boolean): void {
+  state.ready = ready;
+}
+
 export function setMockSettings(publisherSettings: Record<string, unknown>): void {
   state.settings = { publisherSettings, userSettings: {} };
 }

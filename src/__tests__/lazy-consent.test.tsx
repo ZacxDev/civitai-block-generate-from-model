@@ -25,6 +25,7 @@ import {
   renderApp,
   resetBlocksReactMock,
   setMockScopes,
+  setMockReady,
   getMockSpies,
 } from '../test/test-utils';
 
@@ -103,6 +104,27 @@ describe('lazy consent (logged-in viewer without ai:write:budgeted)', () => {
       (c) => (c[0] as { type?: string } | undefined)?.type === 'REQUEST_SIGN_IN'
     );
     expect(signInCall).toBeUndefined();
+  });
+
+  // Regression: the consent-retry useRef + useEffect must sit ABOVE the App's
+  // early returns (e.g. the `!ready` loading return) so hook order is stable.
+  // Placing them after an early return throws React #310 ("rendered more hooks
+  // than during the previous render") on the not-ready → ready transition —
+  // which is exactly what happened live before this fix. Rendering not-ready
+  // first then ready must not crash.
+  it('does not violate rules-of-hooks across the not-ready → ready transition', async () => {
+    setMockScopes(UNCONSENTED_SCOPES);
+    setMockReady(false);
+    const { rerender } = await renderApp(<App />);
+    setMockReady(true);
+    rerender(<App />);
+    // If hook order were unstable this throws before reaching here; reaching the
+    // assertion (block renders its Generate button) proves stable hook order.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+      ).toBeInTheDocument()
+    );
   });
 
   it('after consent lands (token gains the scope), the deferred Generate auto-fires submit', async () => {
