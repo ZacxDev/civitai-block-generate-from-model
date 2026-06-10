@@ -5,6 +5,7 @@ import {
   useBlockContext,
   useBlockResize,
   useBlockSettings,
+  useBlockToken,
   useBuzzPurchase,
   useBuzzWorkflow,
   useCheckpointPicker,
@@ -174,12 +175,50 @@ export function postRequestSignIn(payload?: { returnUrl?: string }): void {
   );
 }
 
+/**
+ * Lazy consent. Raw postMessage of the SDK REQUEST_CONSENT envelope — same
+ * decoupling as postRequestSignIn (works without waiting on a
+ * `@civitai/blocks-react` npm publish; the new `useRequestConsent` helper
+ * produces the identical wire message). A logged-in viewer whose block token is
+ * missing the money/AI scope (`ai:write:budgeted` was withheld at mint because
+ * they haven't consented) clicks Generate → we ask the host to open its consent
+ * UI instead of submitting. The host honors this only after BLOCK_READY and from
+ * the pinned origin, grants the scopes the mint actually withheld (it ignores
+ * the advisory `scopes` hint), re-mints, and pushes the new token via
+ * TOKEN_REFRESH — the block then sees the scope appear and retries. `scopes` is
+ * an optional advisory hint of what the action needs.
+ */
+export function postRequestConsent(payload?: { scopes?: string[] }): void {
+  if (typeof window === 'undefined' || !window.parent) return;
+  const targetOrigin = resolveParentOrigin(
+    typeof document !== 'undefined' ? document.referrer : undefined
+  );
+  window.parent.postMessage(
+    { type: 'REQUEST_CONSENT', ...(payload ? { payload } : {}) },
+    targetOrigin
+  );
+}
+
+/** The consent-gated scope the Generate action requires. When the block token
+ *  doesn't carry it (a logged-in viewer who hasn't consented yet), the click is
+ *  converted into a REQUEST_CONSENT instead of a workflow submit. `buzz:read:self`
+ *  rides along in the same grant but `ai:write:budgeted` is the one Generate needs. */
+export const GENERATE_SCOPE = 'ai:write:budgeted';
+const CONSENT_REQUEST_SCOPES = ['ai:write:budgeted', 'buzz:read:self'];
+
 export function App() {
   const { ready, context, viewer, theme, blockInstanceId } = useBlockContext();
   const settings = useBlockSettings();
   const { submit, estimate, poll, cancel, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
   const checkpointPicker = useCheckpointPicker();
+  // Lazy consent: the block token's actual signed scopes. For a logged-in
+  // viewer who hasn't granted the money/AI scope, the host withholds
+  // `ai:write:budgeted` at mint, so it won't appear here — Generate then asks
+  // the host to open its consent UI (postRequestConsent) instead of submitting.
+  // After consent the host re-mints and pushes a new token via TOKEN_REFRESH;
+  // `scopes` gains the scope and the queued Generate auto-retries (effect below).
+  const { scopes } = useBlockToken();
   // Latest poll fn in a ref so the per-job poll loops (started inside
   // handleGenerate, which closes over the submit-time `poll`) always call
   // the current hook instance without re-subscribing.
@@ -194,6 +233,17 @@ export function App() {
   // now equals the inner's full layout box.
   const rootRef = useRef<HTMLDivElement>(null);
   useBlockResize(rootRef);
+
+  // Lazy consent: a logged-in viewer whose token lacks the Generate scope
+  // (`ai:write:budgeted`) hasn't consented to spending Buzz yet. Distinct from
+  // anon (`!viewer`): the block still renders in full, but Generate routes to a
+  // host consent prompt rather than a submit. Anon is handled first everywhere,
+  // so this only applies to authenticated viewers.
+  const needsConsent = !!viewer && !scopes.includes(GENERATE_SCOPE);
+  // Set true when a Generate click is deferred behind a consent prompt; an
+  // effect below fires the real submit once the scope lands (post-grant token
+  // refresh), so the user's single click "just works" after they approve.
+  const [pendingConsentGenerate, setPendingConsentGenerate] = useState(false);
 
   const [prompt, setPrompt] = useState('');
   // User-edited overrides to the selected showcase's params. See type
@@ -522,7 +572,10 @@ export function App() {
     if (forceZeroBuzz) return;
     // Anon viewers carry no budget scope — an estimate would error. Skip it;
     // the CTA shows "Sign in to generate" rather than a cost for anon.
-    if (!viewer) return;
+    // Same for a logged-in-but-unconsented viewer: the token has no
+    // `ai:write:budgeted` scope yet, so an estimate would 401/error — skip
+    // until they consent (Generate triggers the consent prompt).
+    if (!viewer || needsConsent) return;
     const modelId = modelCtxRead.modelId;
     const modelVersionId = modelCtxRead.modelVersionId;
     if (!modelId || !modelVersionId) return;
@@ -769,6 +822,20 @@ export function App() {
       postRequestSignIn();
       return;
     }
+    // Lazy consent: a logged-in viewer who hasn't granted the money/AI scope
+    // (`ai:write:budgeted` is absent from the token) is prompted to consent —
+    // the host opens its consent UI — instead of submitting. We remember the
+    // click; the effect below re-fires handleGenerate once the scope lands
+    // (the host re-mints + pushes the new token after the grant), so the user
+    // approves once and the generation proceeds without a second click. The
+    // submit path stays server-gated regardless: with no scope, submitWorkflow
+    // would reject — converting the click into a consent prompt is both the UX
+    // and the only path that can actually generate.
+    if (needsConsent) {
+      setPendingConsentGenerate(true);
+      postRequestConsent({ scopes: CONSENT_REQUEST_SCOPES });
+      return;
+    }
     // Debug short-circuit: when "Simulate 0 Buzz" is checked, skip the
     // real submit and synthesize the insufficient-Buzz state. The
     // existing error block renders the top-up CTA, which still opens
@@ -856,6 +923,22 @@ export function App() {
       });
     }
   };
+
+  // Latest handleGenerate in a ref so the consent-retry effect can re-fire it
+  // without re-subscribing every render (handleGenerate is a fresh closure each
+  // render). Mirrors the pollRef pattern above.
+  const handleGenerateRef = useRef(handleGenerate);
+  handleGenerateRef.current = handleGenerate;
+  // Lazy-consent retry: once the viewer grants consent, the host re-mints and
+  // pushes the new token; `scopes` gains GENERATE_SCOPE so `needsConsent` flips
+  // false. If a Generate click was deferred behind that consent, fire it now —
+  // the user approved once and the generation proceeds without a second click.
+  useEffect(() => {
+    if (pendingConsentGenerate && !needsConsent) {
+      setPendingConsentGenerate(false);
+      void handleGenerateRef.current();
+    }
+  }, [pendingConsentGenerate, needsConsent]);
 
   // The platform returns Buzz-budget rejection as a workflow `error` snapshot
   // or via the `error` ref. Sniff for budget/insufficient-funds language to

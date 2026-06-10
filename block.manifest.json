@@ -2,7 +2,7 @@
   "$schema": "https://civitai.com/schemas/app-block/v1.json",
   "appId": "${CIVITAI_APP_ID}",
   "blockId": "generate-from-model",
-  "version": "0.2.21",
+  "version": "0.2.22",
   "name": "Generate from this model",
   "description": "One-tap generation widget that drops onto a model page sidebar. No prompt-craft required: pre-loaded with the page's model, just hit Generate.",
   "type": "block",

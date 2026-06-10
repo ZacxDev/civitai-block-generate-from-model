@@ -128,6 +128,10 @@ interface MockState {
   settings: BlockSettings;
   theme: 'light' | 'dark';
   ready: boolean;
+  /** The block token's signed scopes, as returned by useBlockToken(). Drives
+   *  the lazy-consent path: a viewer without `ai:write:budgeted` hasn't
+   *  consented, so Generate posts REQUEST_CONSENT instead of submitting. */
+  scopes: string[];
   workflow: WorkflowState;
   // Spy hooks exposed so tests can assert calls.
   spies: {
@@ -149,6 +153,7 @@ function makeFreshState(): MockState {
     settings: { publisherSettings: {}, userSettings: {} },
     theme: 'light',
     ready: true,
+    scopes: [...DEFAULT_TOKEN.scopes],
     workflow: {
       status: 'idle',
       result: null,
@@ -184,6 +189,12 @@ export function setMockContext(patch: Partial<ModelSlotContext>): void {
 
 export function setMockViewer(viewer: ViewerInfo | null): void {
   state.viewer = viewer;
+}
+
+/** Set the block token's signed scopes. Omit `ai:write:budgeted` to simulate a
+ *  logged-in viewer who hasn't consented yet (lazy-consent path). */
+export function setMockScopes(scopes: string[]): void {
+  state.scopes = scopes;
 }
 
 export function setMockSettings(publisherSettings: Record<string, unknown>): void {
@@ -226,7 +237,7 @@ function useBlockSettings(): BlockSettings {
 }
 
 function useBlockToken(): BlockToken & { refresh: () => Promise<void> } {
-  return { ...DEFAULT_TOKEN, refresh: async () => {} };
+  return { ...DEFAULT_TOKEN, scopes: state.scopes, refresh: async () => {} };
 }
 
 function useBlockResize(): void {
