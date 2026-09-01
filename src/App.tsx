@@ -653,11 +653,14 @@ export function App() {
   // and the insufficient-Buzz error CTA — never for queue cards.
 
   if (!ready) {
+    // NOT `theme` — pre-BLOCK_INIT that field is the SDK's sentinel, not a
+    // signal. See bootThemeGuess().
+    const bootTheme = bootThemeGuess();
     return (
-      <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
+      <div ref={rootRef} data-theme={bootTheme} style={outerContainerStyle(bootTheme)}>
         <div style={innerContainerStyle()}>
           <StyleSheet />
-          <LoadingSkeleton theme={theme} />
+          <LoadingSkeleton theme={bootTheme} />
         </div>
       </div>
     );
@@ -2243,9 +2246,40 @@ function StyleSheet() {
 }
 
 /**
+ * Which theme to paint with BEFORE BLOCK_INIT lands.
+ *
+ * `useBlockContext().theme` is NOT usable here: the SDK's pre-init snapshot
+ * hardcodes `theme: 'light'` (@civitai/blocks-react internal/transport.ts),
+ * so it is a sentinel, not a signal — honouring it paints every viewer white
+ * for the ~100ms until the host's real theme arrives.
+ *
+ * That matters because index.html now ships a static shimmer skeleton that
+ * paints at first paint (before this bundle exists) and guesses the theme
+ * from `prefers-color-scheme`. If React's first render disagreed, a
+ * dark-mode viewer would get dark -> white -> dark: a NEW flash, at exactly
+ * the moment the skeleton exists to remove one. The two guesses have to be
+ * the same guess.
+ *
+ * Only the boot state uses this. Once `ready` is true the host's real theme
+ * wins, whatever the OS says.
+ */
+function bootThemeGuess(): 'dark' | 'light' {
+  try {
+    return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+  } catch {
+    // Older/embedded webviews without matchMedia. index.html's skeleton
+    // falls back to its unmedia'd light rule in the same situation.
+    return 'light';
+  }
+}
+
+/**
  * Loading skeleton matching the block's eventual layout — header line +
  * checkpoint row + primary CTA. Subtle shimmer animation so the user
  * gets a "something's coming" signal during the BLOCK_INIT round-trip.
+ *
+ * Mirrored statically in index.html so it is on screen before this bundle
+ * loads; `src/__tests__/boot-skeleton.test.tsx` pins the two together.
  */
 function LoadingSkeleton({ theme }: { theme: string | null }) {
   const bar = (w: string, h = 14): CSSProperties => ({

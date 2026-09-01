@@ -194,6 +194,16 @@ export function setMockTheme(theme: 'light' | 'dark'): void {
   state.theme = theme;
 }
 
+/**
+ * Flip the pre-BLOCK_INIT gate. `false` puts the App in its boot state (the
+ * shimmer skeleton) — the branch index.html's static skeleton has to agree
+ * with. Defaults to `true` so every other test file keeps rendering the real
+ * UI without opting in.
+ */
+export function setMockReady(ready: boolean): void {
+  state.ready = ready;
+}
+
 export function setMockWorkflow(patch: Partial<WorkflowState>): void {
   state.workflow = { ...state.workflow, ...patch };
 }
