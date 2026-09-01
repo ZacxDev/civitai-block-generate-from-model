@@ -5,9 +5,99 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Civitai App Block</title>
+    <style>
+      /* ---------------------------------------------------------------
+         Boot skeleton — painted at FIRST PAINT, before the JS bundle.
+
+         Why it is here and not in a stylesheet: `/` is served with
+         `Cache-Control: no-store` (platform nginx.conf), so this document
+         is re-fetched on every open and then sits BLANK for ~300-1200ms
+         while the (immutable, cached) bundle downloads, parses and mounts
+         React. `src/index.css` and the React `<StyleSheet />` both arrive
+         WITH that bundle, so nothing from either exists yet at this point
+         — the resets below are not redundant with index.css, they are the
+         only copy that is live during the gap.
+
+         React clears `#root`'s children before its first commit
+         (`createRoot(container).render(...)` in src/main.tsx), so this
+         markup removes itself. It MUST stay inside #root for that.
+
+         Geometry and colours are the same values `LoadingSkeleton` +
+         `innerContainerStyle` use in src/App.tsx, so hydration is a swap
+         rather than a jump. `src/__tests__/boot-skeleton.test.tsx` pins
+         the two files to each other — change one and that test goes red.
+         --------------------------------------------------------------- */
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+      }
+
+      #root {
+        min-width: 100%;
+      }
+
+      .gfm-boot {
+        box-sizing: border-box;
+        display: block;
+        font-family:
+          -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+        background: #ffffff;
+      }
+
+      .gfm-boot-inner {
+        box-sizing: border-box;
+        padding: 16px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+      }
+
+      .gfm-boot-bar {
+        box-sizing: border-box;
+        border-radius: 4px;
+        background: linear-gradient(90deg, #e9ecef 0%, #f1f3f5 50%, #e9ecef 100%);
+        background-size: 200% 100%;
+        animation: gfm-boot-shimmer 1.4s ease-in-out infinite;
+      }
+
+      @keyframes gfm-boot-shimmer {
+        0% {
+          background-position: 200% 0;
+        }
+        100% {
+          background-position: -200% 0;
+        }
+      }
+
+      /* The host's real theme only arrives with BLOCK_INIT, so before then
+         both this file and App.tsx's `!ready` branch guess from the OS
+         setting. They MUST agree — a disagreement is a dark -> white ->
+         dark flash at hydration, which is the exact thing this skeleton
+         exists to remove. See `bootThemeGuess()` in src/App.tsx. */
+      @media (prefers-color-scheme: dark) {
+        .gfm-boot {
+          background: #1a1b1e;
+        }
+        .gfm-boot-bar {
+          background: linear-gradient(90deg, #1a1b1e 0%, #25262b 50%, #1a1b1e 100%);
+          background-size: 200% 100%;
+        }
+      }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <div class="gfm-boot" aria-hidden="true">
+        <div class="gfm-boot-inner">
+          <div class="gfm-boot-bar" style="width: 60%; height: 18px"></div>
+          <div class="gfm-boot-bar" style="width: 40%; height: 12px"></div>
+          <div class="gfm-boot-bar" style="width: 100%; height: 30px; margin-top: 6px"></div>
+          <div class="gfm-boot-bar" style="width: 100%; height: 40px; margin-top: 10px"></div>
+        </div>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
