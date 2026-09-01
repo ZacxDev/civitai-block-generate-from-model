@@ -2265,6 +2265,27 @@ function StyleSheet() {
  */
 function bootThemeGuess(): 'dark' | 'light' {
   try {
+    // 1. WHAT THE BOOT SCRIPT ALREADY PAINTED WITH. index.html resolves the
+    //    theme in <head> — host fragment first, OS second — and records it on
+    //    <html data-boot-theme>. Reading that value back is what guarantees
+    //    React's first render agrees with the pixels already on screen: it is
+    //    the same value, not an independent re-derivation that could differ.
+    //
+    //    🔴 DO NOT "simplify" this to `parseBlockInitFragment(location.hash)`.
+    //    It was written that way first and it is WRONG, silently: the SDK's own
+    //    iframeTransport reads the fragment during its init and then STRIPS it
+    //    from the URL (`stripBlockInitFragment` + `history.replaceState`,
+    //    blocks-react internal/iframeTransport.js). That init runs before this
+    //    component renders, so by here the hash is already empty and the read
+    //    falls through to the OS guess — producing exactly the dark→light
+    //    repaint this function exists to prevent. Measured in a real browser;
+    //    a jsdom test cannot see it, because mocking @civitai/blocks-react
+    //    means the transport never runs and never strips.
+    const painted = document.documentElement.getAttribute('data-boot-theme');
+    if (painted === 'dark' || painted === 'light') return painted;
+
+    // 2. Boot script absent or blocked (JS-disabled is moot here, but a CSP or
+    //    an edit could drop it). Guess from the OS, the pre-fragment behaviour.
     return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
   } catch {
     // Older/embedded webviews without matchMedia. index.html's skeleton

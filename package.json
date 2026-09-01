@@ -2,7 +2,7 @@
   "name": "civitai-block-generate-from-model",
   "version": "0.1.0",
   "private": true,
-  "description": "Civitai App Block — 'Generate from this model'. One-tap generation widget that embeds on the model.sidebar_top slot.",
+  "description": "Civitai App Block \u2014 'Generate from this model'. One-tap generation widget that embeds on the model.sidebar_top slot.",
   "type": "module",
   "license": "MIT",
   "keywords": [
@@ -27,8 +27,8 @@
     "docker:build": "docker build -t ghcr.io/zacxdev/civitai-block-generate-from-model:latest ."
   },
   "dependencies": {
-    "@civitai/app-sdk": "^0.7.0",
-    "@civitai/blocks-react": "^0.5.0",
+    "@civitai/app-sdk": "^0.36.0",
+    "@civitai/blocks-react": "^0.44.2",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },

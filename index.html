@@ -5,6 +5,49 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Civitai App Block</title>
+    <script>
+      /* BOOT THEME, resolved BEFORE first paint.
+
+         The host appends its real theme to the iframe URL as a fragment
+         (`#civitai-block=v1&theme=dark&…`). Reading it here — inline, in
+         <head>, before the body is parsed — is the only way the skeleton below
+         can paint in the HOST's theme rather than a guess. `prefers-color-scheme`
+         is the fallback, and it is only a guess: a viewer in OS dark mode on a
+         light-themed host would get dark, then be repainted light when
+         BLOCK_INIT lands. That repaint is the thing this exists to remove.
+
+         🔴 This duplicates `parseBlockInitFragment` from @civitai/app-sdk ON
+         PURPOSE, and must not import it: the SDK arrives with the bundle, which
+         is precisely what has not loaded yet. The duplication is a real drift
+         risk, so it is pinned — `src/__tests__/boot-skeleton.test.tsx` feeds the
+         SDK's own `encodeBlockInitFragment` output through this exact regex and
+         fails if the two ever disagree.
+
+         Total, like the SDK's decoder: any malformed, absent, truncated or
+         future-version fragment falls through to the media query rather than
+         throwing. A `try` guards the whole thing because a boot script that
+         throws in <head> would take the skeleton with it. */
+      (function () {
+        var t = null;
+        try {
+          var h = (location.hash || '').replace(/^#/, '');
+          /* Require the version marker: an unknown version must degrade to "no
+             fast path", never to a partially-trusted read. */
+          if (/(^|&)civitai-block=v1(&|$)/.test(h)) {
+            var m = /(^|&)theme=(dark|light)(&|$)/.exec(h);
+            if (m) t = m[2];
+          }
+          if (!t) {
+            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light';
+          }
+        } catch (e) {
+          t = 'light';
+        }
+        document.documentElement.setAttribute('data-boot-theme', t);
+      })();
+    </script>
     <style>
       /* ---------------------------------------------------------------
          Boot skeleton — painted at FIRST PAINT, before the JS bundle.
@@ -76,6 +119,14 @@
          setting. They MUST agree — a disagreement is a dark -> white ->
          dark flash at hydration, which is the exact thing this skeleton
          exists to remove. See `bootThemeGuess()` in src/App.tsx. */
+      /* FALLBACK ONLY — the OS guess, for the case where the boot script above
+         did not run at all (JS disabled). Whenever it did run it sets
+         `data-boot-theme` unconditionally, and the attribute rules below
+         outrank this block on specificity (0,2,0 vs 0,1,0) in BOTH directions,
+         so the host's answer wins even when the OS disagrees with it. That
+         `[data-boot-theme='light']` rule is not redundant with the base rules:
+         without it, a light host + a dark-mode OS would keep this media
+         query's dark paint and then flip light at BLOCK_INIT. */
       @media (prefers-color-scheme: dark) {
         .gfm-boot {
           background: #1a1b1e;
@@ -84,6 +135,22 @@
           background: linear-gradient(90deg, #1a1b1e 0%, #25262b 50%, #1a1b1e 100%);
           background-size: 200% 100%;
         }
+      }
+
+      [data-boot-theme='dark'] .gfm-boot {
+        background: #1a1b1e;
+      }
+      [data-boot-theme='dark'] .gfm-boot-bar {
+        background: linear-gradient(90deg, #1a1b1e 0%, #25262b 50%, #1a1b1e 100%);
+        background-size: 200% 100%;
+      }
+
+      [data-boot-theme='light'] .gfm-boot {
+        background: #ffffff;
+      }
+      [data-boot-theme='light'] .gfm-boot-bar {
+        background: linear-gradient(90deg, #e9ecef 0%, #f1f3f5 50%, #e9ecef 100%);
+        background-size: 200% 100%;
       }
     </style>
   </head>

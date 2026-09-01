@@ -26,6 +26,10 @@ import { resolve } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from '@testing-library/react';
 import { createRoot } from 'react-dom/client';
+import {
+  encodeBlockInitFragment,
+  parseBlockInitFragment,
+} from '@civitai/app-sdk/blocks';
 
 import {
   blocksReactMockFactory,
@@ -117,6 +121,14 @@ function loadingSkeletonSource(): string {
 beforeEach(() => {
   resetBlocksReactMock();
   setPrefersDark(false);
+  // The fragment is read from the real `location.hash`, so a test that sets
+  // one must not leak it into the next — a stale hash would silently make a
+  // later OS-fallback assertion read the previous test's host theme.
+  window.location.hash = '';
+  // Same isolation for the attribute the boot script writes: App.tsx reads it,
+  // so a leftover would make a later OS-fallback assertion read a stale host
+  // theme and pass for the wrong reason.
+  document.documentElement.removeAttribute('data-boot-theme');
 });
 
 afterEach(() => {
@@ -148,13 +160,31 @@ describe('index.html ships a skeleton that paints before the bundle', () => {
     // skeleton hidden in either is simply not found here.
     expect(doc.querySelector('#root .gfm-boot')).not.toBeNull();
 
-    const blocking = Array.from(doc.querySelectorAll('script')).filter(
+    // What "paint-blocked" means here, precisely: nothing ahead of the skeleton
+    // may require a NETWORK FETCH before the parser reaches it. A classic
+    // script with a `src` does; an INLINE one does not — it blocks the parser
+    // only for its own execution, which is why the boot script in <head> is
+    // allowed to be one. It has to be: it resolves the host's theme before the
+    // skeleton paints, and a deferred script runs far too late for that.
+    //
+    // 🔴 The exemption is for INLINE scripts only, and the assertion below is
+    // what keeps it that way — adding a `src` to the boot script would turn it
+    // into exactly the fetch this guard exists to forbid, and would otherwise
+    // slip through as "still a classic script, still exempt".
+    const fetchBlocking = Array.from(doc.querySelectorAll('script')).filter(
       (s) =>
+        s.hasAttribute('src') &&
         s.getAttribute('type') !== 'module' &&
         !s.hasAttribute('defer') &&
         !s.hasAttribute('async')
     );
-    expect(blocking.map((s) => s.outerHTML)).toEqual([]);
+    expect(fetchBlocking.map((s) => s.outerHTML)).toEqual([]);
+
+    const inlineHeadScripts = Array.from(doc.querySelectorAll('head script'));
+    expect(inlineHeadScripts.length).toBeGreaterThan(0); // the boot script
+    for (const s of inlineHeadScripts) {
+      expect(s.hasAttribute('src')).toBe(false);
+    }
   });
 
   it('is REMOVED by React on mount — createRoot clears the container', async () => {
@@ -279,5 +309,138 @@ describe('boot theme is guessed from the OS, not from the SDK sentinel', () => {
     const { container } = await renderApp(<App />);
     const outer = container.querySelector('[data-theme]') as HTMLElement;
     expect(outer.dataset.theme).toBe('light');
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ *  The host's theme, read before the bundle exists
+ * ------------------------------------------------------------------ */
+
+describe("the boot theme comes from the HOST's fragment, not a guess", () => {
+  /**
+   * Run index.html's inline boot script in isolation and report what it
+   * resolved. Extracted from the FILE rather than reimplemented here — a copy
+   * would drift from the thing under test and pass forever.
+   */
+  function runBootScript(hash: string, prefersDark: boolean): string | null {
+    const src = /<script>([\s\S]*?)<\/script>/.exec(INDEX_HTML)?.[1];
+    if (!src) throw new Error('no inline boot script found in index.html');
+    const root: Record<string, string> = {};
+    const fakeDoc = {
+      documentElement: {
+        setAttribute: (k: string, v: string) => {
+          root[k] = v;
+        },
+      },
+    };
+    const fakeWin = {
+      matchMedia: (q: string) => ({ matches: q.includes('dark') && prefersDark }),
+    };
+    // eslint-disable-next-line no-new-func
+    new Function('location', 'document', 'window', src)({ hash }, fakeDoc, fakeWin);
+    return root['data-boot-theme'] ?? null;
+  }
+
+  it("uses the HOST's theme when the fragment carries one, over the OS", () => {
+    // The whole point: OS says dark, host says light — the host wins, so there
+    // is nothing left to repaint when BLOCK_INIT lands.
+    const hash = '#' + encodeBlockInitFragment({
+      theme: 'light',
+      renderMode: 'iframe',
+      blockInstanceId: 'bi_abc',
+    });
+    expect(runBootScript(hash, true)).toBe('light');
+    expect(parseBlockInitFragment(hash).theme).toBe('light');
+  });
+
+  it('agrees with the SDK decoder on the SDK encoder\'s own output', () => {
+    // 🔴 THE DRIFT GUARD. index.html cannot import the SDK — the bundle
+    // carrying it is exactly what has not loaded yet — so it reimplements the
+    // parse. Feeding the SDK's OWN encoder through both sides is what stops
+    // the copy silently diverging from the format it is copying.
+    for (const theme of ['dark', 'light'] as const) {
+      const hash = '#' + encodeBlockInitFragment({
+        theme,
+        renderMode: 'iframe',
+        blockInstanceId: 'bi_abc',
+      });
+      expect(parseBlockInitFragment(hash).theme).toBe(theme);
+      expect(runBootScript(hash, theme === 'light')).toBe(theme);
+    }
+  });
+
+  it('falls back to the OS guess when there is no fragment', () => {
+    expect(runBootScript('', true)).toBe('dark');
+    expect(runBootScript('', false)).toBe('light');
+  });
+
+  it("React's boot render uses what the script PAINTED, after the SDK strips the hash", async () => {
+    // 🔴 THE REGRESSION THIS EXISTS FOR, and it shipped once. `bootThemeGuess`
+    // was first written as `parseBlockInitFragment(location.hash)`. That is
+    // wrong in a way no mocked test can see: the SDK's own iframeTransport
+    // reads the fragment during init and then STRIPS it from the URL
+    // (stripBlockInitFragment + history.replaceState), and that init runs
+    // BEFORE this component renders. Mocking @civitai/blocks-react means the
+    // transport never runs, so the hash survives in tests and the re-parse
+    // looked correct — while the real browser showed dark-then-light.
+    //
+    // So this reproduces the POST-STRIP state: hash EMPTY, attribute set. OS
+    // says dark, host said light; light must win.
+    setPrefersDark(true);
+    setMockTheme('light');
+    window.location.hash = '';
+    document.documentElement.setAttribute('data-boot-theme', 'light');
+
+    const skeleton = await renderBoot();
+    expect((skeleton.closest('[data-theme]') as HTMLElement).dataset.theme).toBe('light');
+  });
+
+  it('React agrees with the boot script for a HOST-dark fragment', async () => {
+    // The other direction, driven end-to-end from the SDK's own encoder: the
+    // script resolves the attribute, React reads that same attribute. OS light,
+    // host dark.
+    const hash =
+      '#' +
+      encodeBlockInitFragment({
+        theme: 'dark',
+        renderMode: 'iframe',
+        blockInstanceId: 'bi_abc',
+      });
+    const painted = runBootScript(hash, false);
+    expect(painted).toBe('dark');
+
+    setPrefersDark(false);
+    setMockTheme('light');
+    document.documentElement.setAttribute('data-boot-theme', painted!);
+    const skeleton = await renderBoot();
+    expect((skeleton.closest('[data-theme]') as HTMLElement).dataset.theme).toBe('dark');
+  });
+
+  it("React's boot render falls back to the OS when the script left no attribute", async () => {
+    // Control for the pair above: with no attribute the OS guess is the only
+    // signal, so their passing proves the attribute is what moved them.
+    setPrefersDark(true);
+    setMockTheme('light');
+    const skeleton = await renderBoot();
+    expect((skeleton.closest('[data-theme]') as HTMLElement).dataset.theme).toBe('dark');
+  });
+
+  it('ignores a fragment it cannot trust rather than half-reading it', () => {
+    // An unknown version must degrade to "no fast path", not to a partial read
+    // — the same totality rule the SDK decoder documents. OS says dark, so a
+    // correct fallback is 'dark'; a half-read would return 'light'.
+    expect(runBootScript('#civitai-block=v2&theme=light', true)).toBe('dark');
+    // No marker at all: a block's own hash route must not be mistaken for one.
+    expect(runBootScript('#theme=light', true)).toBe('dark');
+    // Truncated / junk.
+    expect(runBootScript('#civitai-block=v1&theme=', true)).toBe('dark');
+    expect(runBootScript('#%%%', true)).toBe('dark');
+  });
+
+  it('declares bootSkeleton in the manifest, so the host stands its veil down', () => {
+    // Without this the host covers the iframe until BLOCK_READY and every
+    // other guard in this file is pinning something no user can see.
+    const manifest = JSON.parse(repoFile('block.manifest.json'));
+    expect(manifest.bootSkeleton).toBe(true);
   });
 });
