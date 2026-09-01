@@ -18,6 +18,10 @@
     "ai:write:budgeted",
     "buzz:read:self"
   ],
+  "scopeJustifications": {
+    "ai:write:budgeted": "Runs one image generation per tap from the model page sidebar; each run spends the viewer's Buzz within the publisher's per-generation budget to produce the result shown in the block.",
+    "buzz:read:self": "Reads the viewer's Buzz balance to show the estimated cost on the Generate button and to offer a top-up instead of failing when the balance is below that estimate."
+  },
   "settings": {
     "buzz_budget_per_gen": {
       "type": "number",
@@ -45,7 +49,6 @@
     }
   },
   "iframe": {
-    "src": "https://generate-from-model.civit.ai/",
     "minHeight": 400,
     "maxHeight": 1600,
     "resizable": true,
