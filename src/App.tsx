@@ -914,31 +914,20 @@ export function App() {
     }
   };
 
-  // Buzz-budget rejection has no structured code, so the top-up CTA is decided
-  // by sniffing the SERVER's phrasing.
+  // 🔴 ONE PREDICATE, TWO CONSUMERS. This decides BOTH the money CTA and the
+  // copy under it, and it used to be a second, different rule from the one
+  // `viewerFailureText` uses for the card — a substring match
+  // (`insufficient|not enough|budget|balance`) over the raw server sentence.
+  // That is how the block went on selling Buzz for "not enough VRAM available
+  // on the worker" and for a Prisma constraint named `accountBalance`, while a
+  // test asserting the opposite passed: the two rules lived at different sites,
+  // so fixing one left the other deciding the money.
   //
-  // 🔴 ORDER IS THE WHOLE FIX, AND LATCHING WAS A BUG. `error?.message ??
-  // result?.error` read the wrong one first: post-0.44 the hook's `error` is
-  // set by any throw and never cleared, so `result.error` — where the server's
-  // budget wording lives — was never consulted. The first attempt at this held
-  // the thrown error's `snapshot.error` in state instead, which was worse in
-  // two independent ways: (a) an affordability refusal RESOLVES rather than
-  // throwing (blocks-react useBuzzWorkflow), so a rejection's text is by
-  // construction never an affordability outcome — routing it here sells Buzz
-  // for a failure Buzz cannot fix; and (b) nothing cleared that state on
-  // success, so ONE budget-worded failure pinned the CTA to "Top up" forever
-  // and the Generate button never came back. Measured: after a successful
-  // re-estimate the block had no Generate button at all.
-  //
-  // So: read the RESOLVED snapshot's server text first — the channel the
-  // affordability path actually uses — and fall back to the hook's message.
-  // No state, nothing to go stale.
-  const errMessage = (result?.error ?? error?.message ?? '').toLowerCase();
-  const isInsufficient =
-    errMessage.includes('insufficient') ||
-    errMessage.includes('not enough') ||
-    errMessage.includes('budget') ||
-    errMessage.includes('balance');
+  // The structural signal, from the SDK: a spend-limit refusal is the resolved
+  // `status:'failed'` reply that still carries a PRICE — the server quotes what
+  // it refused to charge. blocks-react uses the same shape as its own
+  // discriminator. No prose, so no wording can fool it.
+  const spendLimited = isSpendLimitRefusal(result);
 
   return (
     <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
@@ -1059,7 +1048,7 @@ export function App() {
               the Generate button for the Top-Up CTA so the user never has
               to click a doomed Generate to discover they're short. The
               error block below renders the EXPLANATORY copy under it. */
-          (forceZeroBuzz || isInsufficient || simulatedInsufficient) ? (
+          (forceZeroBuzz || spendLimited || simulatedInsufficient) ? (
             <button
               type="button"
               onClick={() => openPurchaseModal(budget * 10)}
@@ -1106,7 +1095,7 @@ export function App() {
           )}
         </div>
 
-        {(forceZeroBuzz || simulatedInsufficient || isInsufficient) ? (
+        {(forceZeroBuzz || simulatedInsufficient || spendLimited) ? (
           // Explanatory copy under the proactive Top-Up button above.
           // Distinguishes between the real "you ran out" case and the
           // debug-toggle "we're pretending you ran out" case so a tester
@@ -1115,11 +1104,11 @@ export function App() {
           <p style={{ ...subtleStyle, fontSize: 12, marginTop: -4 }}>
             {forceZeroBuzz
               ? 'Simulate 0 Buzz is on — Generate is hidden. Uncheck the box above to run for real.'
-              : 'Not enough Buzz for this generation.'}
+              : 'This generation hit a Buzz spend limit.'}
           </p>
         ) : null}
 
-        {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && !isInsufficient && !simulatedInsufficient && (
+        {(error || result?.status === 'failed' || result?.status === 'expired' || result?.status === 'canceled') && !spendLimited && !simulatedInsufficient && (
           // Non-insufficient errors only — the insufficient path is now
           // handled proactively above the primary CTA so we don't render
           // a duplicate "Not enough Buzz" surface here.
@@ -1132,7 +1121,7 @@ export function App() {
                   earlier "we no longer render the SDK string" claim was not
                   true of the app — the catches were fixed and this was not.
                   The budget sniff still READS both; it just never shows them. */}
-              {/* No `isInsufficient` ternary here: this block's own render
+              {/* No spend-limit ternary here: this block's own render
                   guard above already excludes that case (it routes to the
                   top-up CTA instead), so the true arm was unreachable —
                   measured, replacing it with a sentinel string left the suite
@@ -2412,9 +2401,39 @@ function bootThemeGuess(): 'dark' | 'light' {
  * and guessing at it is what this comment exists to prevent.
  */
 /**
+ * Is this resolved failure a SPEND-LIMIT refusal?
+ *
+ * 🔴 THE ONE PREDICATE. It decides the money CTA, the copy under it, and the
+ * job card, so those three can never disagree again. Three earlier attempts
+ * used prose — `insufficient|not enough|budget|balance`, then
+ * `rate|too many|velocity|limit` — and each was wrong on ordinary words:
+ * `rate` sits inside `geneRATEd` and `modeRATEd`, and `balance` inside the
+ * Prisma constraint name `accountBalance`. A substring can always be spelled
+ * by accident.
+ *
+ * The shape cannot. The SDK documents this family as the resolved
+ * `status:'failed'` reply that still carries a PRICE — "the server quotes the
+ * price it refused to charge" — and blocks-react uses the same test as its own
+ * discriminator.
+ *
+ * 🔴 AND THE COPY MUST NOT SAY "not enough Buzz", because the family is wider
+ * than a balance shortfall: the SDK enumerates the per-call budget gate, the
+ * per-user daily cap, the per-app aggregate and velocity caps, and the
+ * dev-tunnel session cap. Only the first is about the viewer's balance; a
+ * per-app velocity cap is the APP's limit and no amount of topping up clears
+ * it. The snapshot carries no code distinguishing them, so the honest sentence
+ * names the spend limit and stops there.
+ */
+function isSpendLimitRefusal(
+  snap: { status?: string; cost?: { total?: number | null } | null } | null | undefined
+): boolean {
+  return snap?.status === 'failed' && typeof snap.cost?.total === 'number';
+}
+
+/**
  * Map a resolved failure to viewer copy AND put the server's own words on the
- * developer channel. Kept as one call so the two can never drift apart — the
- * bug being closed here is exactly that the mapping shipped without the log.
+ * developer channel. One call so the two cannot drift apart — the bug being
+ * closed here is exactly that the mapping shipped without the log.
  */
 function logAndMapFailure(
   snap: { status?: string; error?: string | null; cost?: { total?: number | null } | null },
@@ -2432,20 +2451,47 @@ function logAndMapFailure(
   return viewerFailureText(snap, phase);
 }
 
+/**
+ * Viewer-facing text for a RESOLVED failure snapshot.
+ *
+ * 🔴 `snapshot.error` is SERVER-AUTHORED AND UNSANITISED — the SDK documents it
+ * as carrying raw Prisma/pg column and constraint names — so it is logged by
+ * the caller and never rendered.
+ *
+ * `phase` scopes the spend-limit arm: the price-carries-the-refusal rule is
+ * documented for the SUBMIT reply. A job that already started and later failed
+ * is not a spend refusal however it is priced. (On submit the test is in fact
+ * a tautology — blocks-react THROWS a failed reply that carries no numeric
+ * cost, so anything that resolves failed here is priced — but it is written
+ * out because the tautology is a property of today's SDK, not of the contract.)
+ *
+ * Everything else gets one neutral sentence: the resolved path carries no
+ * structured code, and guessing at free text is what the three rounds above
+ * were spent undoing.
+ */
 function viewerFailureText(
   snap: { status?: string; cost?: { total?: number | null } | null },
   phase: 'submit' | 'poll'
 ): string {
-  if (
-    phase === 'submit' &&
-    snap.status === 'failed' &&
-    typeof snap.cost?.total === 'number'
-  ) {
-    return 'Not enough Buzz for this generation.';
+  // `phase` is retained for the log and for readability, but it deliberately
+  // does NOT gate the copy any more. It used to, and that recreated the very
+  // defect this predicate was extracted to remove: the CTA is computed from the
+  // hook's shared `result`, which carries no phase, so a phase-scoped CARD and
+  // a phase-blind CTA disagreed — one saying "failed", the other offering to
+  // sell Buzz. Two rules, one screen. One rule is worth more than the precision
+  // the second one was buying.
+  //
+  // 🔴 The residual imprecision, named rather than hidden: a job that was
+  // priced, started, and then failed mid-render also matches this shape, and
+  // will read as a spend limit. Distinguishing it needs a structured code the
+  // resolved snapshot does not carry. When the SDK grows one, this is the
+  // single place to key on it.
+  void phase;
+  if (isSpendLimitRefusal(snap)) {
+    return 'This generation hit a Buzz spend limit.';
   }
   return 'This generation failed.';
 }
-
 /**
  * Loading skeleton matching the block's eventual layout — header line +
  * checkpoint row + primary CTA. Subtle shimmer animation so the user

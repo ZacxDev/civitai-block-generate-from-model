@@ -31,8 +31,18 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
   it('renders the Top-Up button as the primary action when the error mentions insufficient buzz', async () => {
     setMockSettings({ buzz_budget_per_gen: 50 });
     setMockWorkflow({
-      status: 'idle',
-      error: new Error('insufficient buzz balance'),
+      // 🔴 The STRUCTURAL shape, not wording. A spend-limit refusal is the
+      // resolved failed reply that still carries the price it refused to
+      // charge. These tests used to drive the CTA with an error MESSAGE
+      // containing "insufficient" — which is how "not enough VRAM" and a
+      // Prisma constraint named `accountBalance` also reached it.
+      status: 'error',
+      result: {
+        workflowId: 'wf',
+        status: 'failed',
+        error: 'spend cap exceeded',
+        cost: { total: 500 },
+      } as never,
     });
     await renderApp(<App />);
 
@@ -52,8 +62,18 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
   it('renders the Buzz bolt SVG icon inside the Top-Up button (Tier-4 Delta C)', async () => {
     setMockSettings({ buzz_budget_per_gen: 50 });
     setMockWorkflow({
-      status: 'idle',
-      error: new Error('insufficient buzz balance'),
+      // 🔴 The STRUCTURAL shape, not wording. A spend-limit refusal is the
+      // resolved failed reply that still carries the price it refused to
+      // charge. These tests used to drive the CTA with an error MESSAGE
+      // containing "insufficient" — which is how "not enough VRAM" and a
+      // Prisma constraint named `accountBalance` also reached it.
+      status: 'error',
+      result: {
+        workflowId: 'wf',
+        status: 'failed',
+        error: 'spend cap exceeded',
+        cost: { total: 500 },
+      } as never,
     });
     await renderApp(<App />);
 
@@ -71,13 +91,23 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
 
   it('demotes the error message to supporting copy in the insufficient case', async () => {
     setMockWorkflow({
-      status: 'idle',
-      error: new Error('not enough buzz to run this'),
+      // 🔴 The STRUCTURAL shape, not wording. A spend-limit refusal is the
+      // resolved failed reply that still carries the price it refused to
+      // charge. These tests used to drive the CTA with an error MESSAGE
+      // containing "insufficient" — which is how "not enough VRAM" and a
+      // Prisma constraint named `accountBalance` also reached it.
+      status: 'error',
+      result: {
+        workflowId: 'wf',
+        status: 'failed',
+        error: 'spend cap exceeded',
+        cost: { total: 500 },
+      } as never,
     });
     await renderApp(<App />);
     // Old framing surfaced the raw error message inside an alert. New
     // framing replaces it with a short, calmer line + the CTA.
-    expect(screen.getByText('Not enough Buzz for this generation.')).toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
     // The raw 'not enough buzz to run this' substring should NOT leak —
     // the reframing intentionally hides the orchestrator's verbatim
     // language in favor of a user-facing one-liner.
@@ -98,7 +128,7 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     expect(screen.queryByText('orchestrator timeout')).toBeNull();
     expect(screen.getByText('Generation failed.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Top up Buzz/ })).not.toBeInTheDocument();
-    expect(screen.queryByText('Not enough Buzz for this generation.')).not.toBeInTheDocument();
+    expect(screen.queryByText('This generation hit a Buzz spend limit.')).not.toBeInTheDocument();
   });
 
   it('a RESOLVED budget refusal still reaches the top-up CTA, without showing the server text', async () => {
@@ -111,7 +141,14 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
       // `status: 'failed'`. They are different enums and mixing them silently
       // typechecks nowhere useful.
       status: 'error',
-      result: { workflowId: 'wf', status: 'failed', error: 'insufficient balance' } as never,
+      // Priced — the structural signal. The hook's `error` is ALSO set (an
+      // earlier throw), which is the state that used to shadow this read.
+      result: {
+        workflowId: 'wf',
+        status: 'failed',
+        error: 'insufficient balance',
+        cost: { total: 500 },
+      } as never,
       error: new Error('estimate did not return a usable price (failed)'),
     });
     await renderApp(<App />);
@@ -127,8 +164,18 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     // Generate button at all. The sniff must be derived from current state, not
     // remembered.
     setMockWorkflow({
+      // 🔴 The STRUCTURAL shape, not wording. A spend-limit refusal is the
+      // resolved failed reply that still carries the price it refused to
+      // charge. These tests used to drive the CTA with an error MESSAGE
+      // containing "insufficient" — which is how "not enough VRAM" and a
+      // Prisma constraint named `accountBalance` also reached it.
       status: 'error',
-      result: { workflowId: 'wf', status: 'failed', error: 'insufficient balance' } as never,
+      result: {
+        workflowId: 'wf',
+        status: 'failed',
+        error: 'spend cap exceeded',
+        cost: { total: 500 },
+      } as never,
     });
     const { rerender } = await renderApp(<App />);
     expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
@@ -145,8 +192,18 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
   it('clicking Top-Up calls openPurchaseModal with budget * 10', async () => {
     setMockSettings({ buzz_budget_per_gen: 25 });
     setMockWorkflow({
-      status: 'idle',
-      error: new Error('insufficient funds'),
+      // 🔴 The STRUCTURAL shape, not wording. A spend-limit refusal is the
+      // resolved failed reply that still carries the price it refused to
+      // charge. These tests used to drive the CTA with an error MESSAGE
+      // containing "insufficient" — which is how "not enough VRAM" and a
+      // Prisma constraint named `accountBalance` also reached it.
+      status: 'error',
+      result: {
+        workflowId: 'wf',
+        status: 'failed',
+        error: 'spend cap exceeded',
+        cost: { total: 500 },
+      } as never,
     });
     await renderApp(<App />);
     const spies = getMockSpies();
@@ -158,7 +215,13 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     expect(spies.openPurchaseModal).toHaveBeenCalledWith(250);
   });
 
-  it('also triggers the insufficient path when the workflow result.status is failed with budget language', async () => {
+  it('does NOT trigger the money CTA on budget-sounding WORDS alone', async () => {
+    // 🔴 INVERTED DELIBERATELY. This used to assert that "over budget; not
+    // enough buzz" reached the Top-Up CTA — i.e. it pinned the substring rule.
+    // That rule is why "not enough VRAM available on the worker" and a Prisma
+    // constraint named `accountBalance` also reached it, selling Buzz for
+    // failures Buzz cannot fix. An UNPRICED failure is not a spend refusal,
+    // whatever it says.
     setMockSettings({ buzz_budget_per_gen: 10 });
     setMockWorkflow({
       status: 'idle',
@@ -166,6 +229,23 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
         workflowId: 'wf_fail',
         status: 'failed',
         error: 'over budget; not enough buzz',
+      } as never,
+    });
+    await renderApp(<App />);
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(screen.queryByText('This generation hit a Buzz spend limit.')).toBeNull();
+  });
+
+  it('DOES trigger it on the priced shape, whatever the words say', async () => {
+    // The other half: nonsense wording, correct shape.
+    setMockSettings({ buzz_budget_per_gen: 10 });
+    setMockWorkflow({
+      status: 'idle',
+      result: {
+        workflowId: 'wf_priced',
+        status: 'failed',
+        error: 'zzz unrelated server prose zzz',
+        cost: { total: 7 },
       } as never,
     });
     await renderApp(<App />);

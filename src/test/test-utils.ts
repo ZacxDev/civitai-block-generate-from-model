@@ -268,10 +268,23 @@ function useBuzzWorkflow() {
       status: 'canceled',
     } satisfies Partial<BlockWorkflowSnapshot> as BlockWorkflowSnapshot);
   }
+  // 🔴 PUBLISH `result` THE WAY THE REAL HOOK DOES. blocks-react calls
+  // `setResult(snapshot)` on every resolved submit/poll reply, and `result.error`
+  // is what the app's Buzz routing reads. This mock returned only the statically
+  // configured `state.workflow.result`, so in any test that drives a failure
+  // through `submit`/`poll` spies, `result` stayed null and every assertion about
+  // that routing passed VACUOUSLY — the isolation seam that hid a real defect:
+  // helper and router each tested alone, the seam between them untested.
+  const publish = (fn: ReturnType<typeof vi.fn>) =>
+    vi.fn(async (...args: unknown[]) => {
+      const snap = await (fn as (...a: unknown[]) => Promise<BlockWorkflowSnapshot>)(...args);
+      state.workflow.result = snap ?? null;
+      return snap;
+    });
   return {
     estimate: state.spies.estimate,
-    submit: state.spies.submit,
-    poll: state.spies.poll,
+    submit: publish(state.spies.submit),
+    poll: publish(state.spies.poll),
     cancel: state.spies.cancel,
     status: state.workflow.status,
     result: state.workflow.result,

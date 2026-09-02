@@ -266,7 +266,7 @@ describe('Generation queue (task 3)', () => {
       expect(screen.getByText('This generation failed.')).toBeInTheDocument();
     });
     expect(screen.queryByText(/account 12345/)).toBeNull();
-    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
   });
 
   it('does NOT guess at the server\'s wording — "generate"/"moderated" are not rate limits', async () => {
@@ -289,7 +289,7 @@ describe('Generation queue (task 3)', () => {
       expect(screen.getByText('This generation failed.')).toBeInTheDocument();
     });
     expect(screen.queryByText(/Too many generations/)).toBeNull();
-    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
     expect(screen.queryByText(/moderated/)).toBeNull();
   });
 
@@ -309,10 +309,10 @@ describe('Generation queue (task 3)', () => {
     await waitFor(() => {
       expect(screen.getByText('This generation failed.')).toBeInTheDocument();
     });
-    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
   });
 
-  it('a PRICED refusal on submit IS reported as a Buzz shortfall', async () => {
+  it('a PRICED refusal on submit IS reported as a spend limit', async () => {
     // The one structural case: the SDK documents the budget refusal as the
     // resolved-failed reply that still carries the price it refused to charge.
     const spies = getMockSpies();
@@ -327,7 +327,12 @@ describe('Generation queue (task 3)', () => {
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
-      expect(screen.getByText('Not enough Buzz for this generation.')).toBeInTheDocument();
+      // getAllByText: the CTA copy AND the job card both say it now — that
+      // agreement is the point of the single predicate, so a single-match
+      // query would fail precisely BECAUSE the fix works.
+      expect(
+        screen.getAllByText('This generation hit a Buzz spend limit.').length
+      ).toBeGreaterThan(0);
     });
   });
 
@@ -350,14 +355,16 @@ describe('Generation queue (task 3)', () => {
       expect(screen.getByText('This generation failed.')).toBeInTheDocument();
     });
     expect(screen.queryByText(/accountBalance/)).toBeNull();
-    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
   });
 
-  it('a PRICED poll failure is still NOT a Buzz shortfall (phase scoping)', async () => {
-    // The price-carries-the-refusal rule is documented for the SUBMIT reply. A
-    // job that already started and later failed is not a budget refusal however
-    // it is priced — without the `phase === 'submit'` term this renders a Buzz
-    // shortfall for, say, a worker crash on a priced job.
+  it('a PRICED poll failure reads the SAME as a priced submit refusal (one rule)', async () => {
+    // 🔴 ONE RULE. Phase-scoping the card while the CTA (computed from the
+    // hook's shared `result`, which has no phase) stayed phase-blind meant the
+    // two could disagree on the same screen — card saying "failed", CTA
+    // offering to sell Buzz. The known cost is that a priced job failing
+    // mid-render also reads as a spend limit; that is named in the predicate's
+    // doc and needs a structured code the snapshot does not carry.
     const spies = getMockSpies();
     spies.submit.mockResolvedValue({ workflowId: 'wf_p', status: 'pending' } as never);
     spies.poll.mockResolvedValue({
@@ -371,9 +378,41 @@ describe('Generation queue (task 3)', () => {
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
-      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
+      // getAllByText: the CTA copy AND the job card both say it now — that
+      // agreement is the point of the single predicate, so a single-match
+      // query would fail precisely BECAUSE the fix works.
+      expect(
+        screen.getAllByText('This generation hit a Buzz spend limit.').length
+      ).toBeGreaterThan(0);
     });
-    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+  });
+
+  it('a spy-driven priced refusal reaches the CTA — the mock publishes `result` like the hook', async () => {
+    // 🔴 SEAM GUARD. The money CTA is computed from the hook's shared `result`,
+    // which blocks-react sets on every resolved reply. The test mock used to
+    // return only a statically-configured `result`, so ANY test that drove a
+    // failure through the `submit`/`poll` spies left it null — and every
+    // assertion about the CTA in those tests passed VACUOUSLY. That seam is
+    // where a real defect lived undetected: the helper and the router were each
+    // tested alone and the join between them never was.
+    //
+    // This drives the SPY (not setMockWorkflow) and asserts the surface that
+    // only `result` can produce, so reverting the mock to a static value fails
+    // here rather than silently un-testing six other cases.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({
+      workflowId: 'wf_seam',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: 9 },
+    } as never);
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    });
   });
 
   it("logs the server's reason even though it never renders it", async () => {
