@@ -128,7 +128,7 @@ beforeEach(() => {
   // Same isolation for the attribute the boot script writes: App.tsx reads it,
   // so a leftover would make a later OS-fallback assertion read a stale host
   // theme and pass for the wrong reason.
-  document.documentElement.removeAttribute('data-boot-theme');
+  document.documentElement.removeAttribute('data-civitai-boot-theme');
 });
 
 afterEach(() => {
@@ -338,7 +338,7 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     };
     // eslint-disable-next-line no-new-func
     new Function('location', 'document', 'window', src)({ hash }, fakeDoc, fakeWin);
-    return root['data-boot-theme'] ?? null;
+    return root['data-civitai-boot-theme'] ?? null;
   }
 
   it("uses the HOST's theme when the fragment carries one, over the OS", () => {
@@ -389,7 +389,7 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     setPrefersDark(true);
     setMockTheme('light');
     window.location.hash = '';
-    document.documentElement.setAttribute('data-boot-theme', 'light');
+    document.documentElement.setAttribute('data-civitai-boot-theme', 'light');
 
     const skeleton = await renderBoot();
     expect((skeleton.closest('[data-theme]') as HTMLElement).dataset.theme).toBe('light');
@@ -411,7 +411,7 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
 
     setPrefersDark(false);
     setMockTheme('light');
-    document.documentElement.setAttribute('data-boot-theme', painted!);
+    document.documentElement.setAttribute('data-civitai-boot-theme', painted!);
     const skeleton = await renderBoot();
     expect((skeleton.closest('[data-theme]') as HTMLElement).dataset.theme).toBe('dark');
   });
@@ -435,6 +435,51 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     // Truncated / junk.
     expect(runBootScript('#civitai-block=v1&theme=', true)).toBe('dark');
     expect(runBootScript('#%%%', true)).toBe('dark');
+  });
+
+  it('the attribute actually DRIVES the paint — both themes have a rule', () => {
+    // 🔴 THE STEP NOTHING PINNED. script -> attribute -> React was guarded three
+    // ways; attribute -> PIXELS was guarded nowhere, and deleting either
+    // `[data-civitai-boot-theme=...]` rule left the whole suite green while a
+    // dark host on a light OS would paint white and then repaint — the exact
+    // defect this feature removes, shipped silently.
+    const css = /<style>([\s\S]*?)<\/style>/.exec(INDEX_HTML)?.[1] ?? '';
+    const ruleFor = (theme: 'dark' | 'light', sel: string) =>
+      new RegExp(
+        `\\[data-civitai-boot-theme='${theme}'\\]\\s+\\${sel}\\s*\\{[^}]*background[^}]*\\}`
+      ).test(css);
+    for (const theme of ['dark', 'light'] as const) {
+      expect(ruleFor(theme, '.gfm-boot')).toBe(true);
+      expect(ruleFor(theme, '.gfm-boot-bar')).toBe(true);
+    }
+    // ...and they must carry the SAME colours the media-query/base rules use,
+    // or the attribute path and the no-JS path disagree.
+    const dark = /\[data-civitai-boot-theme='dark'\]\s+\.gfm-boot\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    const light = /\[data-civitai-boot-theme='light'\]\s+\.gfm-boot\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
+    expect(dark.toLowerCase()).toContain('#1a1b1e');
+    expect(light.toLowerCase()).toContain('#ffffff');
+  });
+
+  it('matches the SDK on inputs the encoder never emits, including the dangerous one', () => {
+    // 🔴 The encoder-output drift test can only exercise the canonical form —
+    // it is structurally incapable of finding a disagreement, because that is
+    // the one input on which the two cannot disagree. These are the inputs a
+    // differential actually found.
+    //
+    // The dangerous direction is ACCEPT-where-the-SDK-REJECTS: two markers,
+    // the first unknown. The SDK reads the FIRST key and refuses; an unanchored
+    // `.test()` found the second and accepted.
+    const twoMarkers = '#civitai-block=v2&civitai-block=v1&theme=light';
+    expect(parseBlockInitFragment(twoMarkers).theme).toBeUndefined();
+    expect(runBootScript(twoMarkers, true)).toBe('dark'); // OS fallback, not 'light'
+
+    // Order-independence and unknown extra keys must still be accepted.
+    expect(runBootScript('#civitai-block=v1&zz=1&theme=dark', false)).toBe('dark');
+    expect(parseBlockInitFragment('#civitai-block=v1&zz=1&theme=dark').theme).toBe('dark');
+
+    // A superstring version must NOT satisfy the v1 gate.
+    expect(runBootScript('#civitai-block=v11&theme=light', true)).toBe('dark');
+    expect(parseBlockInitFragment('#civitai-block=v11&theme=light').theme).toBeUndefined();
   });
 
   it('declares bootSkeleton in the manifest, so the host stands its veil down', () => {

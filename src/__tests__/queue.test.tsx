@@ -267,10 +267,17 @@ describe('Generation queue (task 3)', () => {
     );
 
     // Second submit rejects → a failed card appears; the first card stays.
+    // 🔴 The card must NOT show the raw error text. This asserted
+    // `getByText(/orchestrator unavailable/)` until the blocks-react 0.44 bump
+    // made submit() THROW rather than resolve a failed snapshot — at which
+    // point the string on the card became the SDK's developer-facing summary
+    // ("submit did not return a usable workflow (…) — reason on
+    // .snapshot.error"), which the SDK documents must never reach a viewer.
     await userEvent.click(generate());
     await waitFor(() => {
-      expect(screen.getByText(/orchestrator unavailable/)).toBeInTheDocument();
+      expect(screen.getByText(/Couldn't submit this generation/)).toBeInTheDocument();
     });
+    expect(screen.queryByText(/orchestrator unavailable/)).toBeNull();
     // The successful card is untouched.
     expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1);
   });

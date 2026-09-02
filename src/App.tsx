@@ -8,6 +8,8 @@ import {
   useBuzzPurchase,
   useBuzzWorkflow,
   useCheckpointPicker,
+  WorkflowEstimateError,
+  WorkflowSubmitError,
 } from '@civitai/blocks-react';
 import type {
   BlockCheckpointInfo,
@@ -250,6 +252,14 @@ export function App() {
   // (checkpoint or selected showcase) changes.
   const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
+  // The SERVER's own words for the last estimate failure. Held separately from
+  // `estimateError` (which is OUR copy, and is what renders) because the
+  // budget/top-up sniff below has to read the server's phrasing and must never
+  // display it: `snapshot.error` is server-authored and unsanitised.
+  const [estimateServerReason, setEstimateServerReason] = useState<string | null>(null);
+  // Same, for submit. Kept apart from the estimate one so a stale estimate
+  // reason cannot keep the top-up CTA up after a successful re-quote.
+  const [submitServerReason, setSubmitServerReason] = useState<string | null>(null);
   const estimateInFlightRef = useRef(0);
   // Skip the override-driven debounced re-estimate on first mount — the
   // immediate identity effect already covers the initial cost quote.
@@ -551,32 +561,51 @@ export function App() {
     })
       .then((snap) => {
         if (myId !== estimateInFlightRef.current) return;
-        // A host-side estimate FAILURE comes back as a RESOLVED snapshot with
-        // status 'failed' + an error message — the host stamps a non-empty
-        // workflowId sentinel so the SDK validator DELIVERS it (an empty
-        // workflowId is dropped by the validator, which used to hang this
-        // request to the 120s transport timeout and leave the CTA stuck on its
-        // budget fallback with no explanation). The transport itself only
-        // rejects on timeout, so a failed estimate lands HERE, not in .catch.
-        if (snap.status === 'failed' || typeof snap.error === 'string') {
-          // eslint-disable-next-line no-console
-          console.warn('[gfm] estimate failed', { attempt: myId, error: snap.error });
-          setEstimateError(snap.error ?? 'estimate failed');
-          setEstimatedCost(null);
-          return;
-        }
+        // 🔴 A FAILED estimate no longer arrives here. Up to
+        // @civitai/blocks-react 0.5.x `estimate()` RESOLVED a failure snapshot
+        // and left the hook's `error` null, so this branch handled it. From
+        // 0.44.x it THROWS `WorkflowEstimateError` instead, so failures land in
+        // `.catch` below and the old `status === 'failed'` arm here was dead
+        // code sitting under a comment that said the opposite. Kept as a
+        // defensive no-cost guard only.
         const cost = snap.cost?.total;
         // eslint-disable-next-line no-console
         console.debug('[gfm] estimate resolved', { attempt: myId, cost });
         setEstimatedCost(typeof cost === 'number' ? cost : null);
         setEstimateError(null);
       })
-      .catch((err) => {
+      .catch((err: unknown) => {
         if (myId !== estimateInFlightRef.current) return;
+        // 🔴 NEVER render `err.message` or `snapshot.error` to a viewer. The
+        // SDK documents both as developer-facing: `message` is a generic
+        // summary whose wording is not a contract, and `snapshot.error` is
+        // server-authored and UNSANITISED. Branch on `code`, which is the only
+        // stable target, and return copy this block owns.
+        //
+        // This is why it matters: before the 0.44 bump a failed estimate
+        // resolved and we rendered the server's reason. After it, rendering
+        // `err.message` verbatim would have put
+        // "estimate did not return a usable price (failed) — reason on
+        // .snapshot.error" in front of a user.
+        const serverReason =
+          err instanceof WorkflowEstimateError ? err.snapshot?.error : undefined;
         // eslint-disable-next-line no-console
-        console.warn('[gfm] estimate rejected', { attempt: myId, err: String(err) });
-        setEstimateError(err instanceof Error ? err.message : 'estimate failed');
+        console.warn('[gfm] estimate rejected', {
+          attempt: myId,
+          code: err instanceof WorkflowEstimateError ? err.code : undefined,
+          // Developer channel only — this is where the server's text belongs.
+          serverReason,
+          err: String(err),
+        });
+        setEstimateError(
+          err instanceof WorkflowEstimateError && err.code === 'no-cost'
+            ? "Couldn't price this generation right now."
+            : "Couldn't estimate cost."
+        );
         setEstimatedCost(null);
+        // The budget sniff reads the SERVER's words, not ours — keep them for
+        // it without ever rendering them. See `insufficientHint` below.
+        setEstimateServerReason(typeof serverReason === 'string' ? serverReason : null);
       });
   };
 
@@ -853,17 +882,59 @@ export function App() {
     } catch (err) {
       // Mark this job failed; the rest of the queue is unaffected. The
       // insufficient-Buzz CTA path keys off the shared `error` separately.
+      //
+      // 🔴 Same rule as the estimate catch: `err.message` and `snapshot.error`
+      // are developer-facing, and from blocks-react 0.44 `submit()` THROWS
+      // rather than resolving a failed snapshot — so the card was about to
+      // start showing "submit did not return a usable workflow
+      // (workflow-failed) — reason on .snapshot.error" to a user. Branch on
+      // `code`; the server's text goes to the console only.
+      const submitReason =
+        err instanceof WorkflowSubmitError ? err.snapshot?.error : undefined;
+      // eslint-disable-next-line no-console
+      console.warn('[gfm] submit rejected', {
+        localId,
+        code: err instanceof WorkflowSubmitError ? err.code : undefined,
+        serverReason: submitReason,
+        err: String(err),
+      });
       patchJob(localId, {
         status: 'failed',
-        error: err instanceof Error ? err.message : 'submit failed',
+        // `exception` = nothing was queued and no money moved. `workflow-failed`
+        // = a workflow-shaped reply came back already failed. The SDK is
+        // emphatic that these differ on whether money may have moved, so they
+        // do not share a sentence.
+        error:
+          err instanceof WorkflowSubmitError && err.code === 'workflow-failed'
+            ? 'This generation failed to start.'
+            : "Couldn't submit this generation.",
       });
+      setSubmitServerReason(typeof submitReason === 'string' ? submitReason : null);
     }
   };
 
-  // The platform returns Buzz-budget rejection as a workflow `error` snapshot
-  // or via the `error` ref. Sniff for budget/insufficient-funds language to
-  // surface the top-up CTA. (No structured error.code field today.)
-  const errMessage = (error?.message ?? result?.error ?? '').toLowerCase();
+  // Buzz-budget rejection has no structured code, so the top-up CTA is decided
+  // by sniffing the SERVER's phrasing — never our own copy, which by design
+  // contains none of these words.
+  //
+  // 🔴 ORDER IS LOAD-BEARING, and `??` was wrong here. It read
+  // `error?.message ?? result?.error`, which was fine while a failed estimate
+  // RESOLVED and left the hook's `error` null. From blocks-react 0.44 a failure
+  // THROWS, so `error` is always set and `result.error` — the only place the
+  // server's wording lived — was never consulted: the CTA silently stopped
+  // appearing between a failed estimate and the next successful one. Read every
+  // server-authored source, and put OUR strings nowhere near this.
+  const errMessage = [
+    result?.error,
+    estimateServerReason,
+    submitServerReason,
+    // Last: the hook's own message is a developer summary, but a pre-0.44 host
+    // path can still surface a server sentence through it.
+    error?.message,
+  ]
+    .filter((s): s is string => typeof s === 'string')
+    .join(' ')
+    .toLowerCase();
   const isInsufficient =
     errMessage.includes('insufficient') ||
     errMessage.includes('not enough') ||
@@ -2267,9 +2338,15 @@ function bootThemeGuess(): 'dark' | 'light' {
   try {
     // 1. WHAT THE BOOT SCRIPT ALREADY PAINTED WITH. index.html resolves the
     //    theme in <head> — host fragment first, OS second — and records it on
-    //    <html data-boot-theme>. Reading that value back is what guarantees
+    //    <html data-civitai-boot-theme>. Reading that value back is what guarantees
     //    React's first render agrees with the pixels already on screen: it is
     //    the same value, not an independent re-derivation that could differ.
+    //
+    //    (Since blocks-react 0.44 the SDK's own transport also seeds its
+    //    snapshot from the fragment before React renders, so `theme` from
+    //    useBlockContext() is ALSO the host's answer when a fragment exists —
+    //    but it stays the `'light'` sentinel when one does not, and this
+    //    function must be right in both cases. Reading what was painted is.)
     //
     //    🔴 DO NOT "simplify" this to `parseBlockInitFragment(location.hash)`.
     //    It was written that way first and it is WRONG, silently: the SDK's own
@@ -2281,7 +2358,7 @@ function bootThemeGuess(): 'dark' | 'light' {
     //    repaint this function exists to prevent. Measured in a real browser;
     //    a jsdom test cannot see it, because mocking @civitai/blocks-react
     //    means the transport never runs and never strips.
-    const painted = document.documentElement.getAttribute('data-boot-theme');
+    const painted = document.documentElement.getAttribute('data-civitai-boot-theme');
     if (painted === 'dark' || painted === 'light') return painted;
 
     // 2. Boot script absent or blocked (JS-disabled is moot here, but a CSP or

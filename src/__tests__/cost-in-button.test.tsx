@@ -73,29 +73,42 @@ describe('Cost inside the Generate button (delta #1)', () => {
     await waitFor(() => {
       expect(screen.getByText(/Couldn't estimate cost/)).toBeInTheDocument();
     });
-    expect(screen.getByText(/network down/)).toBeInTheDocument();
+    // 🔴 The raw error text must NOT reach the screen. This asserted
+    // `getByText(/network down/)` until the blocks-react 0.44 bump, which is
+    // the shape that let an SDK-internal developer string ship to viewers.
+    expect(screen.queryByText(/network down/)).toBeNull();
   });
 
-  it('surfaces a RESOLVED failed estimate snapshot (delivered host error) as an estimate error', async () => {
-    // Durable fix for the recurring "CTA buzz cost never updates" bug: the host
-    // stamps a non-empty workflowId on failure snapshots so the SDK validator
-    // DELIVERS them (an empty workflowId is dropped → the request hangs to the
-    // 120s timeout → the CTA sits on its budget fallback with no explanation).
-    // A delivered failure RESOLVES estimate() with status:'failed' + error (the
-    // transport only rejects on timeout), so the block must detect it in .then
-    // and surface it — not silently null the cost as if it just hadn't landed.
+  it('surfaces a THROWN estimate failure without rendering the server\'s text', async () => {
+    // 🔴 THIS TEST USED TO ENCODE THE OPPOSITE CONTRACT, and stayed green
+    // through a bump that inverted it. Up to blocks-react 0.5.x a delivered
+    // host failure RESOLVED estimate() with `status:'failed'` and the block
+    // rendered `snapshot.error`. From 0.44.x it THROWS WorkflowEstimateError.
+    // Because the fixture kept RESOLVING, the suite went on passing while
+    // production started rendering the SDK's developer-facing summary
+    // ("estimate did not return a usable price (failed) — reason on
+    // .snapshot.error") to viewers. The fixture now throws what the real SDK
+    // throws, so the fake can no longer be wrong in the same direction as the
+    // code.
     const { getMockSpies } = await import('../test/test-utils');
+    const { WorkflowEstimateError } = await import('@civitai/blocks-react');
     getMockSpies().estimate.mockReset();
-    getMockSpies().estimate.mockResolvedValue({
-      workflowId: 'failed',
-      status: 'failed',
-      error: 'orchestrator unavailable',
-    } as never);
+    getMockSpies().estimate.mockRejectedValue(
+      new WorkflowEstimateError(
+        {
+          workflowId: 'failed',
+          status: 'failed',
+          error: 'orchestrator unavailable',
+        } as never,
+        'failed'
+      )
+    );
     await renderApp(<App />);
     await waitFor(() => {
       expect(screen.getByText(/Couldn't estimate cost/)).toBeInTheDocument();
     });
-    expect(screen.getByText(/orchestrator unavailable/)).toBeInTheDocument();
+    // The server's unsanitised text stays in the console, never on screen.
+    expect(screen.queryByText(/orchestrator unavailable/)).toBeNull();
     // CTA still renders an actionable fallback (≤ budget), not a numeric cost.
     const btn = screen.getByRole('button', { name: /Generate Image/ });
     expect(btn.textContent ?? '').toMatch(/Generate Image \(≤ \d+/);

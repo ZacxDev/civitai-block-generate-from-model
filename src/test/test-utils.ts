@@ -362,8 +362,22 @@ export async function generate(
  * factory. Test files call `vi.mock('@civitai/blocks-react', () => blocksReactMockFactory())`
  * at the top of the file (must be before any `import { App }`).
  */
-export function blocksReactMockFactory() {
+export async function blocksReactMockFactory() {
+  // `vi.importActual` and NOT a plain import: a static import of the module we
+  // are mocking is circular and makes the whole test FILE fail to load, which
+  // vitest reports as "no tests" rather than as a failure.
+  const actual =
+    await vi.importActual<typeof import('@civitai/blocks-react')>('@civitai/blocks-react');
   return {
+    // 🔴 RE-EXPORT THE REAL ERROR CLASSES. App.tsx branches with
+    // `err instanceof WorkflowEstimateError`; a wholesale mock that omits them
+    // makes that `instanceof undefined`, which THROWS inside the catch and
+    // silently swallows the whole error path — the estimate error simply never
+    // renders. This is the stale-wholesale-mock class: the module gained an
+    // export and the fake did not. They must be the REAL classes, not stubs,
+    // or `instanceof` is false for an error the real SDK threw.
+    WorkflowEstimateError: actual.WorkflowEstimateError,
+    WorkflowSubmitError: actual.WorkflowSubmitError,
     useBlockContext,
     useBlockSettings,
     useBlockToken,

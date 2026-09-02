@@ -25,15 +25,33 @@
 
          Total, like the SDK's decoder: any malformed, absent, truncated or
          future-version fragment falls through to the media query rather than
-         throwing. A `try` guards the whole thing because a boot script that
-         throws in <head> would take the skeleton with it. */
+         throwing. The `try` is belt-and-braces, NOT load-bearing: an inline
+         script that throws does not stop the parser, and the skeleton paints
+         either way (measured — replacing this whole script with a bare `throw`
+         still renders it in both OS modes). What the `try` actually buys is
+         that a throw mid-resolution still leaves `t` set to a usable value.
+
+         🔴 KNOWN, DELIBERATE NARROWING vs the SDK: `URLSearchParams`
+         percent-decodes and this regex does not, so `theme=%64ark` and
+         `civitai%2dblock=v1` are read by the SDK and ignored here. That
+         direction is safe — it falls back to the OS guess. The encoder never
+         emits either form. */
       (function () {
         var t = null;
         try {
           var h = (location.hash || '').replace(/^#/, '');
-          /* Require the version marker: an unknown version must degrade to "no
-             fast path", never to a partially-trusted read. */
-          if (/(^|&)civitai-block=v1(&|$)/.test(h)) {
+          /* Read the FIRST `civitai-block` key and require it to be exactly v1.
+             An unknown version must degrade to "no fast path", never to a
+             partially-trusted read.
+
+             🔴 `.test(/(^|&)civitai-block=v1(&|$)/)` was WRONG and is the one
+             way this copy diverged from the SDK in the DANGEROUS direction:
+             on `#civitai-block=v2&civitai-block=v1&theme=light` the SDK reads
+             the FIRST marker (URLSearchParams.get), sees v2 and refuses — while
+             an unanchored `.test` found the SECOND and accepted. Matching the
+             first key reproduces the SDK's precedence. */
+          var mk = /(^|&)civitai-block=([^&]*)/.exec(h);
+          if (mk && mk[2] === 'v1') {
             var m = /(^|&)theme=(dark|light)(&|$)/.exec(h);
             if (m) t = m[2];
           }
@@ -45,7 +63,7 @@
         } catch (e) {
           t = 'light';
         }
-        document.documentElement.setAttribute('data-boot-theme', t);
+        document.documentElement.setAttribute('data-civitai-boot-theme', t);
       })();
     </script>
     <style>
@@ -121,10 +139,10 @@
          exists to remove. See `bootThemeGuess()` in src/App.tsx. */
       /* FALLBACK ONLY — the OS guess, for the case where the boot script above
          did not run at all (JS disabled). Whenever it did run it sets
-         `data-boot-theme` unconditionally, and the attribute rules below
+         `data-civitai-boot-theme` unconditionally, and the attribute rules below
          outrank this block on specificity (0,2,0 vs 0,1,0) in BOTH directions,
          so the host's answer wins even when the OS disagrees with it. That
-         `[data-boot-theme='light']` rule is not redundant with the base rules:
+         `[data-civitai-boot-theme='light']` rule is not redundant with the base rules:
          without it, a light host + a dark-mode OS would keep this media
          query's dark paint and then flip light at BLOCK_INIT. */
       @media (prefers-color-scheme: dark) {
@@ -137,18 +155,18 @@
         }
       }
 
-      [data-boot-theme='dark'] .gfm-boot {
+      [data-civitai-boot-theme='dark'] .gfm-boot {
         background: #1a1b1e;
       }
-      [data-boot-theme='dark'] .gfm-boot-bar {
+      [data-civitai-boot-theme='dark'] .gfm-boot-bar {
         background: linear-gradient(90deg, #1a1b1e 0%, #25262b 50%, #1a1b1e 100%);
         background-size: 200% 100%;
       }
 
-      [data-boot-theme='light'] .gfm-boot {
+      [data-civitai-boot-theme='light'] .gfm-boot {
         background: #ffffff;
       }
-      [data-boot-theme='light'] .gfm-boot-bar {
+      [data-civitai-boot-theme='light'] .gfm-boot-bar {
         background: linear-gradient(90deg, #e9ecef 0%, #f1f3f5 50%, #e9ecef 100%);
         background-size: 200% 100%;
       }
