@@ -12,7 +12,7 @@
  * on. If the App grows to use a hook not represented here, add it here
  * rather than fighting the harness.
  */
-import type { ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { expect, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -101,11 +101,6 @@ export const DEFAULT_MODEL_CONTEXT: ModelSlotContext = {
   modelName: 'Luna_arianaV3',
   modelType: 'LORA',
   modelNsfwLevel: 1,
-  creatorUserId: 10,
-  viewerUserId: 2,
-  viewerNsfwEnabled: false,
-  viewerUsername: 'test-viewer',
-  viewerStatus: 'active',
   theme: 'light',
   checkpoint: DEFAULT_CHECKPOINT,
   showcaseImages: DEFAULT_SHOWCASES,
@@ -122,6 +117,18 @@ type WorkflowState = {
   error: Error | null;
 };
 
+/**
+ * What `useBuzzBalance()` reports. `balance: null` is the SDK's "we do not know"
+ * — never fetched, anon viewer, or a host error — and the App's spend predicate
+ * must fail toward NOT-a-shortfall on it, so it is the DEFAULT here: a test that
+ * wants the money CTA has to opt in with `setMockBuzzBalance`.
+ */
+type BalanceState = {
+  balance: { blue: number; green: number; yellow: number } | null;
+  loading: boolean;
+  error: Error | null;
+};
+
 interface MockState {
   context: ModelSlotContext;
   viewer: ViewerInfo | null;
@@ -129,6 +136,7 @@ interface MockState {
   theme: 'light' | 'dark';
   ready: boolean;
   workflow: WorkflowState;
+  buzzBalance: BalanceState;
   // Spy hooks exposed so tests can assert calls.
   spies: {
     submit: ReturnType<typeof vi.fn>;
@@ -139,6 +147,7 @@ interface MockState {
     checkpointOpen: ReturnType<typeof vi.fn>;
     checkpointPersist: ReturnType<typeof vi.fn>;
     track: ReturnType<typeof vi.fn>;
+    refetchBuzzBalance: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -154,6 +163,7 @@ function makeFreshState(): MockState {
       result: null,
       error: null,
     },
+    buzzBalance: { balance: null, loading: false, error: null },
     spies: {
       submit: vi.fn(),
       estimate: vi.fn(),
@@ -163,6 +173,7 @@ function makeFreshState(): MockState {
       checkpointOpen: vi.fn(),
       checkpointPersist: vi.fn(),
       track: vi.fn(),
+      refetchBuzzBalance: vi.fn(),
     },
   };
 }
@@ -208,8 +219,84 @@ export function setMockWorkflow(patch: Partial<WorkflowState>): void {
   state.workflow = { ...state.workflow, ...patch };
 }
 
+/**
+ * Shape what `useBuzzBalance()` reports. Defaults to `{ balance: null }` — the
+ * SDK's "unknown" — because that is the case the App must fail SAFE on.
+ *
+ * `setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 0 } })` is a
+ * viewer who genuinely cannot afford anything; a large balance is a viewer for
+ * whom no priced refusal can be an affordability problem.
+ */
+export function setMockBuzzBalance(patch: Partial<BalanceState>): void {
+  state.buzzBalance = { ...state.buzzBalance, ...patch };
+  // Notify any mounted `useBuzzBalance()` so a change made MID-TEST re-renders
+  // the App. Before this the mock read `state` at render time only, so nothing
+  // could move the balance after mount — see `setMockBuzzBalanceRefetch`.
+  notifyBalance();
+}
+
+/**
+ * 🔴 THE HARNESS GAP THIS CLOSES (round 6, F3). `refetchBuzzBalance` used to be
+ * a bare `vi.fn()` and the balance was a value fixed before mount, so NO test
+ * could express the one thing the money path actually does: settle a workflow,
+ * re-read the balance, and render against the NEW figure. Two whole defect
+ * families lived in that blind spot (a post-debit balance re-classifying the
+ * failure that caused the debit; a refetch's `loading`/`error` blanking a
+ * genuine shortfall's top-up CTA), and two guards written in round 5 survived
+ * mutation because nothing here could tell a refetch happened.
+ *
+ * The behaviours mirror the REAL `useBuzzBalance` exactly (see
+ * `blocks-react/dist/hooks/useBuzzBalance.js`):
+ *   - `refetch()` sets `loading: true` and clears `error` SYNCHRONOUSLY;
+ *   - on success it replaces `balance` and clears `loading`;
+ *   - on failure it sets `error` and clears `loading`, LEAVING the previous
+ *     `balance` in place — the hook never nulls a value it once fetched.
+ *
+ * `'inert'` is the default (a bare spy, nothing moves) so existing tests are
+ * unaffected. The async settle lands on a microtask: flush it with
+ * `await act(async () => {})` or a `waitFor`.
+ */
+export type BuzzRefetchBehaviour =
+  | { kind: 'inert' }
+  | { kind: 'resolves'; balance: { blue: number; green: number; yellow: number } }
+  | { kind: 'fails'; error?: Error }
+  | { kind: 'never' };
+
+export function setMockBuzzBalanceRefetch(behaviour: BuzzRefetchBehaviour): void {
+  state.spies.refetchBuzzBalance.mockImplementation(() => {
+    if (behaviour.kind === 'inert') return;
+    // Synchronous half — exactly what the real hook does first.
+    state.buzzBalance = { ...state.buzzBalance, loading: true, error: null };
+    notifyBalance();
+    if (behaviour.kind === 'never') return;
+    void Promise.resolve().then(() => {
+      if (behaviour.kind === 'resolves') {
+        state.buzzBalance = { balance: behaviour.balance, loading: false, error: null };
+      } else {
+        // Balance RETAINED — the real hook only sets `error` and `loading`.
+        state.buzzBalance = {
+          ...state.buzzBalance,
+          loading: false,
+          error: behaviour.error ?? new Error('host refused'),
+        };
+      }
+      notifyBalance();
+    });
+  });
+}
+
 export function getMockSpies(): MockState['spies'] {
   return state.spies;
+}
+
+/**
+ * Read back what `useBuzzBalance()` currently reports. Exists so a test can
+ * PROVE a `refetch()` actually landed (or is still in flight) instead of
+ * asserting an outcome that would look identical if the refetch never fired —
+ * the reassuring-zero shape that let round 5's refetch guards survive mutation.
+ */
+export function getMockBuzzBalance(): BalanceState {
+  return state.buzzBalance;
 }
 
 /* ------------------------------------------------------------------ *
@@ -273,14 +360,75 @@ function useBuzzWorkflow() {
       status: 'canceled',
     } satisfies Partial<BlockWorkflowSnapshot> as BlockWorkflowSnapshot);
   }
+  // 🔴 PUBLISH `result` THE WAY THE REAL HOOK DOES. blocks-react calls
+  // `setResult(snapshot)` on every resolved submit/poll reply, and `result.error`
+  // is what the app's Buzz routing reads. This mock returned only the statically
+  // configured `state.workflow.result`, so in any test that drives a failure
+  // through `submit`/`poll` spies, `result` stayed null and every assertion about
+  // that routing passed VACUOUSLY — the isolation seam that hid a real defect:
+  // helper and router each tested alone, the seam between them untested.
+  const publish = (fn: ReturnType<typeof vi.fn>) =>
+    vi.fn(async (...args: unknown[]) => {
+      const snap = await (fn as (...a: unknown[]) => Promise<BlockWorkflowSnapshot>)(...args);
+      state.workflow.result = snap ?? null;
+      return snap;
+    });
+  // 🔴 `estimate` PUBLISHES TOO, AND IT PUBLISHES BEFORE IT REJECTS. The real
+  // hook calls `setResult(snapshot)` on the host's reply and only THEN throws
+  // `WorkflowEstimateError` for an unusable one — so a refused estimate leaves a
+  // failure snapshot on the shared `result` that the money CTA reads, on FIRST
+  // PAINT, before the viewer has clicked anything. Wrapping only `submit`/`poll`
+  // left that join untested, which is exactly the gap it hid: no test could
+  // reach the CTA through the estimate path at all.
+  const publishEstimate = (fn: ReturnType<typeof vi.fn>) =>
+    vi.fn(async (...args: unknown[]) => {
+      try {
+        const snap = await (fn as (...a: unknown[]) => Promise<BlockWorkflowSnapshot>)(...args);
+        state.workflow.result = snap ?? null;
+        return snap;
+      } catch (err) {
+        const snap = (err as { snapshot?: BlockWorkflowSnapshot } | null)?.snapshot;
+        if (snap) state.workflow.result = snap;
+        throw err;
+      }
+    });
   return {
-    estimate: state.spies.estimate,
-    submit: state.spies.submit,
-    poll: state.spies.poll,
+    estimate: publishEstimate(state.spies.estimate),
+    submit: publish(state.spies.submit),
+    poll: publish(state.spies.poll),
     cancel: state.spies.cancel,
     status: state.workflow.status,
     result: state.workflow.result,
     error: state.workflow.error,
+  };
+}
+
+/**
+ * Subscribers so a balance change made from OUTSIDE React (a `refetch()`
+ * settling, a `setMockBuzzBalance` mid-test) actually re-renders the App. The
+ * real hook holds this state internally; the mock reads a module-level record,
+ * which React has no way to observe without this.
+ */
+const balanceListeners = new Set<() => void>();
+
+function notifyBalance(): void {
+  balanceListeners.forEach((l) => l());
+}
+
+function useBuzzBalance() {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const listener = () => bump((n) => n + 1);
+    balanceListeners.add(listener);
+    return () => {
+      balanceListeners.delete(listener);
+    };
+  }, []);
+  return {
+    balance: state.buzzBalance.balance,
+    loading: state.buzzBalance.loading,
+    error: state.buzzBalance.error,
+    refetch: state.spies.refetchBuzzBalance as unknown as () => void,
   };
 }
 
@@ -367,13 +515,28 @@ export async function generate(
  * factory. Test files call `vi.mock('@civitai/blocks-react', () => blocksReactMockFactory())`
  * at the top of the file (must be before any `import { App }`).
  */
-export function blocksReactMockFactory() {
+export async function blocksReactMockFactory() {
+  // `vi.importActual` and NOT a plain import: a static import of the module we
+  // are mocking is circular and makes the whole test FILE fail to load, which
+  // vitest reports as "no tests" rather than as a failure.
+  const actual =
+    await vi.importActual<typeof import('@civitai/blocks-react')>('@civitai/blocks-react');
   return {
+    // 🔴 RE-EXPORT THE REAL ERROR CLASSES. App.tsx branches with
+    // `err instanceof WorkflowEstimateError`; a wholesale mock that omits them
+    // makes that `instanceof undefined`, which THROWS inside the catch and
+    // silently swallows the whole error path — the estimate error simply never
+    // renders. This is the stale-wholesale-mock class: the module gained an
+    // export and the fake did not. They must be the REAL classes, not stubs,
+    // or `instanceof` is false for an error the real SDK threw.
+    WorkflowEstimateError: actual.WorkflowEstimateError,
+    WorkflowSubmitError: actual.WorkflowSubmitError,
     useBlockContext,
     useBlockSettings,
     useBlockToken,
     useBlockResize,
     useBuzzWorkflow,
+    useBuzzBalance,
     useBuzzPurchase,
     useCheckpointPicker,
     useCivitaiNavigate,

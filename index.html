@@ -5,6 +5,74 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <title>Civitai App Block</title>
+    <script>
+      /* BOOT THEME, resolved BEFORE first paint.
+
+         The host appends its real theme to the iframe URL as a fragment
+         (`#civitai-block=v1&theme=dark&…`). Reading it here — inline, in
+         <head>, before the body is parsed — is the only way the skeleton below
+         can paint in the HOST's theme rather than a guess. `prefers-color-scheme`
+         is the fallback, and it is only a guess: a viewer in OS dark mode on a
+         light-themed host would get dark, then be repainted light when
+         BLOCK_INIT lands. That repaint is the thing this exists to remove.
+
+         🔴 This duplicates `parseBlockInitFragment` from @civitai/app-sdk ON
+         PURPOSE, and must not import it: the SDK arrives with the bundle, which
+         is precisely what has not loaded yet. The duplication is a real drift
+         risk, so it is pinned — `src/__tests__/boot-skeleton.test.tsx` feeds the
+         SDK's own `encodeBlockInitFragment` output through this exact regex and
+         fails if the two ever disagree.
+
+         Total, like the SDK's decoder: any malformed, absent, truncated or
+         future-version fragment falls through to the media query rather than
+         throwing. The `try` is belt-and-braces, NOT load-bearing: an inline
+         script that throws does not stop the parser, and the skeleton paints
+         either way (measured — replacing this whole script with a bare `throw`
+         still renders it in both OS modes). What the `try` actually buys is
+         that a throw mid-resolution still leaves `t` set to a usable value.
+
+         🔴 KNOWN, DELIBERATE NARROWING vs the SDK: `URLSearchParams`
+         percent-decodes and this regex does not, so `theme=%64ark` and
+         `civitai%2dblock=v1` are read by the SDK and ignored here. That
+         direction is safe — it falls back to the OS guess. The encoder never
+         emits either form. */
+      (function () {
+        var t = null;
+        try {
+          var h = (location.hash || '').replace(/^#/, '');
+          /* Read the FIRST `civitai-block` key and require it to be exactly v1.
+             An unknown version must degrade to "no fast path", never to a
+             partially-trusted read.
+
+             🔴 `.test(/(^|&)civitai-block=v1(&|$)/)` was WRONG and is the one
+             way this copy diverged from the SDK in the DANGEROUS direction:
+             on `#civitai-block=v2&civitai-block=v1&theme=light` the SDK reads
+             the FIRST marker (URLSearchParams.get), sees v2 and refuses — while
+             an unanchored `.test` found the SECOND and accepted. Matching the
+             first key reproduces the SDK's precedence. */
+          var mk = /(^|&)civitai-block=([^&]*)/.exec(h);
+          if (mk && mk[2] === 'v1') {
+            /* Same first-key rule as the marker above, for the same reason:
+               `URLSearchParams.get` returns the FIRST `theme`, so
+               `theme=blue&theme=dark` is `blue` to the SDK — invalid, hence no
+               fast path. A regex that skips the invalid one and matches the
+               later valid one accepts what the SDK refuses, and paints a theme
+               the host never asked for. Fixing only the marker key left this
+               one with the identical defect. */
+            var mt = /(^|&)theme=([^&]*)/.exec(h);
+            if (mt && (mt[2] === 'dark' || mt[2] === 'light')) t = mt[2];
+          }
+          if (!t) {
+            t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light';
+          }
+        } catch (e) {
+          t = 'light';
+        }
+        document.documentElement.setAttribute('data-civitai-boot-theme', t);
+      })();
+    </script>
     <style>
       /* ---------------------------------------------------------------
          Boot skeleton — painted at FIRST PAINT, before the JS bundle.
@@ -76,6 +144,14 @@
          setting. They MUST agree — a disagreement is a dark -> white ->
          dark flash at hydration, which is the exact thing this skeleton
          exists to remove. See `bootThemeGuess()` in src/App.tsx. */
+      /* FALLBACK ONLY — the OS guess, for the case where the boot script above
+         did not run at all (JS disabled). Whenever it did run it sets
+         `data-civitai-boot-theme` unconditionally, and the attribute rules below
+         outrank this block on specificity (0,2,0 vs 0,1,0) in BOTH directions,
+         so the host's answer wins even when the OS disagrees with it. That
+         `[data-civitai-boot-theme='light']` rule is not redundant with the base rules:
+         without it, a light host + a dark-mode OS would keep this media
+         query's dark paint and then flip light at BLOCK_INIT. */
       @media (prefers-color-scheme: dark) {
         .gfm-boot {
           background: #1a1b1e;
@@ -84,6 +160,22 @@
           background: linear-gradient(90deg, #1a1b1e 0%, #25262b 50%, #1a1b1e 100%);
           background-size: 200% 100%;
         }
+      }
+
+      [data-civitai-boot-theme='dark'] .gfm-boot {
+        background: #1a1b1e;
+      }
+      [data-civitai-boot-theme='dark'] .gfm-boot-bar {
+        background: linear-gradient(90deg, #1a1b1e 0%, #25262b 50%, #1a1b1e 100%);
+        background-size: 200% 100%;
+      }
+
+      [data-civitai-boot-theme='light'] .gfm-boot {
+        background: #ffffff;
+      }
+      [data-civitai-boot-theme='light'] .gfm-boot-bar {
+        background: linear-gradient(90deg, #e9ecef 0%, #f1f3f5 50%, #e9ecef 100%);
+        background-size: 200% 100%;
       }
     </style>
   </head>

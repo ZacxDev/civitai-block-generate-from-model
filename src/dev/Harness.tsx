@@ -82,11 +82,6 @@ export function Harness({ children }: { children: ReactNode }) {
       modelName: 'Dev Mock Model',
       modelType: 'Checkpoint',
       modelNsfwLevel: 1,
-      creatorUserId: 1,
-      viewerUserId: 2,
-      viewerNsfwEnabled: false,
-      viewerUsername: 'dev-viewer',
-      viewerStatus: 'active',
       theme: 'light',
       // Mock showcases so the carousel + advanced-controls flow is
       // exercisable locally. Mirrors the shape the host sends in prod

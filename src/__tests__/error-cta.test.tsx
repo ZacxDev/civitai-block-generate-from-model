@@ -7,7 +7,7 @@
  *   Any other error    → unchanged: error text inside the alert box, no CTA
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
@@ -15,25 +15,72 @@ import {
   getMockSpies,
   renderApp,
   resetBlocksReactMock,
+  setMockBuzzBalance,
   setMockSettings,
   setMockWorkflow,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
 
+import { WorkflowEstimateError } from '@civitai/blocks-react';
+
 import { App } from '../App';
+
+/** A viewer with nothing to spend — every pool at zero. */
+const BROKE = { blue: 0, green: 0, yellow: 0 };
+
+/**
+ * A priced refusal. 42 is deliberately UNDER `DEFAULT_TOKEN.buzzBudget` (50):
+ * a price ABOVE the token's own per-call ceiling was refused by the host's
+ * budget gate, not by the wallet, and the predicate excludes it on purpose.
+ */
+const REFUSAL = {
+  workflowId: 'wf',
+  status: 'failed',
+  error: 'spend cap exceeded',
+  cost: { total: 42 },
+};
+
+/**
+ * Make the mount-time auto-estimate REFUSE with `snap`.
+ *
+ * 🔴 REQUIRED, not decoration. The mock publishes an estimate's snapshot onto
+ * the hook's shared `result` exactly as blocks-react does (`useBuzzWorkflow.js`
+ * — `setResult(snapshot)` runs BEFORE the rejection). So a test that only sets
+ * `result` statically describes a state the App leaves immediately: the
+ * auto-estimate resolves on mount and overwrites it with its own
+ * `{status:'pending'}` reply, and the money CTA vanishes. Refusing the estimate
+ * is how this screen is reached for real — and it is the same publish-then-
+ * reject join the first-paint CTA defect lives on.
+ */
+const refuseEstimateWith = (snap: Record<string, unknown>) => {
+  getMockSpies().estimate.mockRejectedValue(
+    new WorkflowEstimateError(snap as never, 'failed')
+  );
+};
 
 beforeEach(() => {
   resetBlocksReactMock();
+  // 🔴 THIS FILE'S SUBJECT IS THE MONEY CTA, and the CTA now requires a KNOWN
+  // balance that does not cover the quoted price — a top-up only fixes an
+  // affordability problem, and "we don't know the balance" is not one (the mock
+  // defaults to `balance: null` for exactly that reason). So the baseline here
+  // is a broke viewer. The tests that assert the CTA is ABSENT do not depend on
+  // it (an unpriced failure is not a refusal at any balance); the
+  // unknown-balance, covered-balance and over-budget paths get their own
+  // describe below.
+  setMockBuzzBalance({ balance: BROKE });
 });
 
 describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
   it('renders the Top-Up button as the primary action when the error mentions insufficient buzz', async () => {
     setMockSettings({ buzz_budget_per_gen: 50 });
-    setMockWorkflow({
-      status: 'idle',
-      error: new Error('insufficient buzz balance'),
-    });
+    // 🔴 The STRUCTURAL shape, not wording. A spend-limit refusal is the
+    // resolved failed reply that still carries the price it refused to charge.
+    // These tests used to drive the CTA with an error MESSAGE containing
+    // "insufficient" — which is how "not enough VRAM" and a Prisma constraint
+    // named `accountBalance` also reached it.
+    refuseEstimateWith(REFUSAL);
     await renderApp(<App />);
 
     // The CTA labels itself with the suggested top-up amount (budget × 10).
@@ -51,10 +98,7 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
 
   it('renders the Buzz bolt SVG icon inside the Top-Up button (Tier-4 Delta C)', async () => {
     setMockSettings({ buzz_budget_per_gen: 50 });
-    setMockWorkflow({
-      status: 'idle',
-      error: new Error('insufficient buzz balance'),
-    });
+    refuseEstimateWith(REFUSAL);
     await renderApp(<App />);
 
     // The bolt anchors the Top-Up CTA visually to the Buzz currency. JSDOM
@@ -70,18 +114,14 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
   });
 
   it('demotes the error message to supporting copy in the insufficient case', async () => {
-    setMockWorkflow({
-      status: 'idle',
-      error: new Error('not enough buzz to run this'),
-    });
+    refuseEstimateWith(REFUSAL);
     await renderApp(<App />);
     // Old framing surfaced the raw error message inside an alert. New
     // framing replaces it with a short, calmer line + the CTA.
-    expect(screen.getByText('Not enough Buzz for this generation.')).toBeInTheDocument();
-    // The raw 'not enough buzz to run this' substring should NOT leak —
-    // the reframing intentionally hides the orchestrator's verbatim
-    // language in favor of a user-facing one-liner.
-    expect(screen.queryByText('not enough buzz to run this')).not.toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
+    // The raw server sentence must not leak — the reframing intentionally hides
+    // the orchestrator's verbatim language in favor of a user-facing one-liner.
+    expect(screen.queryByText(/spend cap exceeded/)).toBeNull();
   });
 
   it('does NOT render the Top-Up button for non-insufficient errors', async () => {
@@ -90,18 +130,78 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
       error: new Error('orchestrator timeout'),
     });
     await renderApp(<App />);
-    // Plain error text in the alert box, no Top-Up CTA, no reframed copy.
-    expect(screen.getByText('orchestrator timeout')).toBeInTheDocument();
+    // 🔴 The RAW error must not reach the alert box. This asserted
+    // `getByText('orchestrator timeout')` — i.e. it pinned the leak. Both
+    // sources behind that line are developer/server text: the hook's message is
+    // the SDK's own summary, and `result.error` is server-authored and
+    // unsanitised (documented as carrying raw Prisma/pg column names).
+    expect(screen.queryByText('orchestrator timeout')).toBeNull();
+    expect(screen.getByText('Generation failed.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Top up Buzz/ })).not.toBeInTheDocument();
-    expect(screen.queryByText('Not enough Buzz for this generation.')).not.toBeInTheDocument();
+    expect(screen.queryByText('This generation hit a Buzz spend limit.')).not.toBeInTheDocument();
+  });
+
+  it('a RESOLVED budget refusal still reaches the top-up CTA, without showing the server text', async () => {
+    // 🔴 THE AFFORDABILITY PATH RESOLVES, it does not throw (blocks-react
+    // useBuzzWorkflow). So the server's wording arrives on `result.error`, and
+    // the routing must read that source FIRST — the hook's `error` is set by any
+    // earlier throw and never cleared, which is what shadowed this.
+    setMockWorkflow({
+      // The HOOK's status is `error`; the SNAPSHOT it carries is the thing with
+      // `status: 'failed'`. They are different enums and mixing them silently
+      // typechecks nowhere useful.
+      status: 'error',
+      error: new Error('estimate did not return a usable price (failed)'),
+    });
+    refuseEstimateWith({ ...REFUSAL, error: 'insufficient balance' });
+    await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    // ...and the raw server sentence is not on screen.
+    expect(screen.queryByText(/insufficient balance/)).toBeNull();
+  });
+
+  it('does not LATCH: a later successful re-estimate clears the top-up CTA and Generate returns', async () => {
+    // 🔴 REGRESSION GUARD. An earlier fix held the failure text in state and
+    // never cleared it, so ONE budget-worded failure pinned the CTA to "Top up"
+    // permanently — measured: after a successful re-estimate the block had NO
+    // Generate button at all.
+    //
+    // 🔴 ROUND 6 REWRITE, AND THE REWRITE IS THE POINT. This used to "recover"
+    // by mutating the hook's shared `result` to null and re-rendering, which
+    // worked only because the CTA re-derived its verdict from `result` on every
+    // render — i.e. the test was pinned to the very mechanism that produced F1
+    // and F2 (a live re-derivation over an input that moves under it). The
+    // verdict is now STORED at decision time, so a bare re-render correctly
+    // changes nothing; recovery has to be a real DECISION. It is: the block's
+    // actual way out of this screen is to re-quote (pick another showcase /
+    // change a param), and a resolved estimate clears the verdict. Driving that
+    // path is also a stronger claim than the old one — it proves the user can
+    // actually get back to Generate, which mutating `result` never did.
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+
+    // The user picks a different preview → the identity effect re-quotes, and
+    // this time a price comes back.
+    getMockSpies().estimate.mockResolvedValue({
+      workflowId: 'wf_estimate',
+      status: 'pending',
+      cost: { total: 12 },
+    } as never);
+    await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull()
+    );
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    expect(screen.queryByText('This generation hit a Buzz spend limit.')).toBeNull();
   });
 
   it('clicking Top-Up calls openPurchaseModal with budget * 10', async () => {
     setMockSettings({ buzz_budget_per_gen: 25 });
-    setMockWorkflow({
-      status: 'idle',
-      error: new Error('insufficient funds'),
-    });
+    refuseEstimateWith(REFUSAL);
     await renderApp(<App />);
     const spies = getMockSpies();
     spies.openPurchaseModal.mockClear();
@@ -112,17 +212,159 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     expect(spies.openPurchaseModal).toHaveBeenCalledWith(250);
   });
 
-  it('also triggers the insufficient path when the workflow result.status is failed with budget language', async () => {
+  it('does NOT trigger the money CTA on budget-sounding WORDS alone', async () => {
+    // 🔴 INVERTED DELIBERATELY. This used to assert that "over budget; not
+    // enough buzz" reached the Top-Up CTA — i.e. it pinned the substring rule.
+    // That rule is why "not enough VRAM available on the worker" and a Prisma
+    // constraint named `accountBalance` also reached it, selling Buzz for
+    // failures Buzz cannot fix. An UNPRICED failure is not a spend refusal,
+    // whatever it says.
     setMockSettings({ buzz_budget_per_gen: 10 });
-    setMockWorkflow({
-      status: 'idle',
-      result: {
-        workflowId: 'wf_fail',
-        status: 'failed',
-        error: 'over budget; not enough buzz',
-      } as never,
+    refuseEstimateWith({
+      workflowId: 'wf_fail',
+      status: 'failed',
+      error: 'over budget; not enough buzz',
+    });
+    await renderApp(<App />);
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(screen.queryByText('This generation hit a Buzz spend limit.')).toBeNull();
+  });
+
+  it('DOES trigger it on the priced shape, whatever the words say', async () => {
+    // The other half: nonsense wording, correct shape.
+    setMockSettings({ buzz_budget_per_gen: 10 });
+    refuseEstimateWith({
+      workflowId: 'wf_priced',
+      status: 'failed',
+      error: 'zzz unrelated server prose zzz',
+      cost: { total: 7 },
     });
     await renderApp(<App />);
     expect(screen.getByRole('button', { name: /Top up · 100/ })).toBeInTheDocument();
+  });
+});
+
+/**
+ * Round 5. "Priced + failed" is NOT a shortfall on its own — the SDK enumerates
+ * a whole family of priced, resolving refusals a top-up cannot fix (per-app
+ * velocity, the aggregate daily cap, a fail-closed deny, a missing quote), and
+ * a charged job that dies mid-render lands on the same shape. The discriminator
+ * is arithmetic: does the viewer's spendable balance cover the quoted price?
+ *
+ * Every case below fixes the SNAPSHOT and varies only the money context, so
+ * nothing here can be passing on wording.
+ */
+describe('a priced refusal is only a SHORTFALL when the balance cannot cover it', () => {
+  const expectNoMoneyCta = () => {
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(screen.queryByText('This generation hit a Buzz spend limit.')).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+  };
+
+  it('COVERED balance → no purchase CTA, Generate stays, the neutral reason shows', async () => {
+    // 100 > 42. Whatever refused this generation, money was not the obstacle —
+    // so selling Buzz for it would be selling a fix that cannot work.
+    setMockBuzzBalance({ balance: { blue: 40, green: 30, yellow: 30 } });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expectNoMoneyCta();
+    expect(screen.getByText('Generation failed.')).toBeInTheDocument();
+  });
+
+  it('UNKNOWN balance (null) → no purchase CTA — unknown must never read as short', async () => {
+    // The default. Anon viewer, missing scope, host error, first paint before
+    // the balance lands: all of them arrive as `null`, and the safe direction is
+    // to under-offer.
+    setMockBuzzBalance({ balance: null });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expectNoMoneyCta();
+  });
+
+  // 🔴 THESE TWO ARE INVERTED FROM ROUND 5, DELIBERATELY, AND THAT IS THE F2
+  // FIX. They used to assert that `loading` or `error` on the balance fetch
+  // SUPPRESSED the money CTA — "a figure being replaced is unknown, and unknown
+  // must not read as short". Measured in round 6, that rule is what produced
+  // the defect: `refetch()` sets `loading` synchronously, so a genuine
+  // shortfall's top-up CTA blanked itself for one bridge round-trip and put
+  // back a Generate button that would fail identically, and a refetch that
+  // FAILED left it that way until the next terminal workflow — a viewer who
+  // truly cannot afford the generation, permanently offered no way to fix it.
+  //
+  // The SDK never nulls a balance it once fetched (`useBuzzBalance.js` sets
+  // only `loading`/`error`), so during either state `balance` still holds the
+  // last figure a fetch actually returned. That figure is sound here because of
+  // the lifecycle clause: the only failures classified at all are ones the host
+  // never accepted, so no debit has landed and the last read is still current.
+  it('balance LOADING over the last known figure → the verdict is UNCHANGED', async () => {
+    setMockBuzzBalance({ balance: BROKE, loading: true });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
+  });
+
+  it('balance fetch ERRORED over the last known figure → the verdict is UNCHANGED', async () => {
+    setMockBuzzBalance({ balance: BROKE, error: new Error('host refused') });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
+  });
+
+  it('NEVER-fetched balance stays unknown even while loading → no purchase CTA', async () => {
+    // The negative control for the pair above, and the case the old rule was
+    // really reaching for. `null` means no fetch has EVER succeeded, which the
+    // two states above do not imply — and it must still fail toward
+    // NOT-a-shortfall.
+    setMockBuzzBalance({ balance: null, loading: true });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expectNoMoneyCta();
+  });
+
+  it('price ABOVE the token budget cap → no purchase CTA, even for a broke viewer', async () => {
+    // `DEFAULT_TOKEN.buzzBudget` is 50 and the host gates
+    // `cost_estimate <= token.buzzBudget` before it forwards anything, so a
+    // refusal quoting 900 was stopped by the TOKEN's per-call ceiling. Buzz
+    // bought today does not raise a claim minted at block load.
+    setMockBuzzBalance({ balance: BROKE });
+    refuseEstimateWith({ ...REFUSAL, cost: { total: 900 } });
+    await renderApp(<App />);
+    expectNoMoneyCta();
+  });
+
+  it('SHORT balance under the cap → the purchase CTA, and Generate is replaced', async () => {
+    // The positive control for all five negatives above: same snapshot, same
+    // token, only the balance moved. Without it the block could be refusing to
+    // sell Buzz for every reason and every negative would still pass.
+    setMockBuzzBalance({ balance: { blue: 10, green: 10, yellow: 10 } }); // 30 < 42
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
+  });
+
+  it('the boundary: spendable EXACTLY equal to the price is not a shortfall', async () => {
+    // 42 === 42. `<`, not `<=` — a viewer who can afford it to the Buzz was not
+    // refused for affordability.
+    setMockBuzzBalance({ balance: { blue: 42, green: 0, yellow: 0 } });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expectNoMoneyCta();
+  });
+
+  it('all three pools count toward what the viewer can spend', async () => {
+    // 20 + 20 + 20 = 60 ≥ 42, but no single pool covers it. Reading only one
+    // (e.g. `yellow`) would call this viewer broke and sell them Buzz they hold.
+    setMockBuzzBalance({ balance: { blue: 20, green: 20, yellow: 20 } });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expectNoMoneyCta();
   });
 });
