@@ -252,14 +252,6 @@ export function App() {
   // (checkpoint or selected showcase) changes.
   const [estimatedCost, setEstimatedCost] = useState<number | null>(null);
   const [estimateError, setEstimateError] = useState<string | null>(null);
-  // The SERVER's own words for the last estimate failure. Held separately from
-  // `estimateError` (which is OUR copy, and is what renders) because the
-  // budget/top-up sniff below has to read the server's phrasing and must never
-  // display it: `snapshot.error` is server-authored and unsanitised.
-  const [estimateServerReason, setEstimateServerReason] = useState<string | null>(null);
-  // Same, for submit. Kept apart from the estimate one so a stale estimate
-  // reason cannot keep the top-up CTA up after a successful re-quote.
-  const [submitServerReason, setSubmitServerReason] = useState<string | null>(null);
   const estimateInFlightRef = useRef(0);
   // Skip the override-driven debounced re-estimate on first mount — the
   // immediate identity effect already covers the initial cost quote.
@@ -355,7 +347,7 @@ export function App() {
             status: snap.status as QueueJobStatus,
             cost: snap.cost?.total ?? null,
             imageUrls: snap.imageUrls ?? [],
-            ...(snap.error ? { error: snap.error } : {}),
+            ...(snap.error ? { error: viewerFailureText(snap) } : {}),
           });
           if (JOB_TERMINAL.has(snap.status as QueueJobStatus)) {
             cleanup();
@@ -597,15 +589,16 @@ export function App() {
           serverReason,
           err: String(err),
         });
+        // Reason only — the line below renders "Couldn't estimate cost: {this}",
+        // so repeating the prefix here produced "Couldn't estimate cost:
+        // Couldn't estimate cost." The suite could not see it: the assertion
+        // matched the PREFIX, which is satisfied either way.
         setEstimateError(
           err instanceof WorkflowEstimateError && err.code === 'no-cost'
-            ? "Couldn't price this generation right now."
-            : "Couldn't estimate cost."
+            ? 'no price came back for these settings.'
+            : 'the estimate service is unavailable — try again in a moment.'
         );
         setEstimatedCost(null);
-        // The budget sniff reads the SERVER's words, not ours — keep them for
-        // it without ever rendering them. See `insufficientHint` below.
-        setEstimateServerReason(typeof serverReason === 'string' ? serverReason : null);
       });
   };
 
@@ -862,7 +855,7 @@ export function App() {
         status: snap.status as QueueJobStatus,
         cost: snap.cost?.total ?? estimatedCost,
         imageUrls: snap.imageUrls ?? [],
-        ...(snap.error ? { error: snap.error } : {}),
+        ...(snap.error ? { error: viewerFailureText(snap) } : {}),
       });
       // submit() does NOT auto-poll (SDK gotcha #10) — start this job's
       // own poll loop unless it already came back terminal (cached hit).
@@ -909,32 +902,29 @@ export function App() {
             ? 'This generation failed to start.'
             : "Couldn't submit this generation.",
       });
-      setSubmitServerReason(typeof submitReason === 'string' ? submitReason : null);
     }
   };
 
   // Buzz-budget rejection has no structured code, so the top-up CTA is decided
-  // by sniffing the SERVER's phrasing — never our own copy, which by design
-  // contains none of these words.
+  // by sniffing the SERVER's phrasing.
   //
-  // 🔴 ORDER IS LOAD-BEARING, and `??` was wrong here. It read
-  // `error?.message ?? result?.error`, which was fine while a failed estimate
-  // RESOLVED and left the hook's `error` null. From blocks-react 0.44 a failure
-  // THROWS, so `error` is always set and `result.error` — the only place the
-  // server's wording lived — was never consulted: the CTA silently stopped
-  // appearing between a failed estimate and the next successful one. Read every
-  // server-authored source, and put OUR strings nowhere near this.
-  const errMessage = [
-    result?.error,
-    estimateServerReason,
-    submitServerReason,
-    // Last: the hook's own message is a developer summary, but a pre-0.44 host
-    // path can still surface a server sentence through it.
-    error?.message,
-  ]
-    .filter((s): s is string => typeof s === 'string')
-    .join(' ')
-    .toLowerCase();
+  // 🔴 ORDER IS THE WHOLE FIX, AND LATCHING WAS A BUG. `error?.message ??
+  // result?.error` read the wrong one first: post-0.44 the hook's `error` is
+  // set by any throw and never cleared, so `result.error` — where the server's
+  // budget wording lives — was never consulted. The first attempt at this held
+  // the thrown error's `snapshot.error` in state instead, which was worse in
+  // two independent ways: (a) an affordability refusal RESOLVES rather than
+  // throwing (blocks-react useBuzzWorkflow), so a rejection's text is by
+  // construction never an affordability outcome — routing it here sells Buzz
+  // for a failure Buzz cannot fix; and (b) nothing cleared that state on
+  // success, so ONE budget-worded failure pinned the CTA to "Top up" forever
+  // and the Generate button never came back. Measured: after a successful
+  // re-estimate the block had no Generate button at all.
+  //
+  // So: read the RESOLVED snapshot's server text first — the channel the
+  // affordability path actually uses — and fall back to the hook's message.
+  // No state, nothing to go stale.
+  const errMessage = (result?.error ?? error?.message ?? '').toLowerCase();
   const isInsufficient =
     errMessage.includes('insufficient') ||
     errMessage.includes('not enough') ||
@@ -1126,7 +1116,16 @@ export function App() {
           // a duplicate "Not enough Buzz" surface here.
           <div style={errorBoxStyle(theme)} role="alert">
             <p style={{ margin: 0 }}>
-              {error?.message ?? result?.error ?? 'Generation failed.'}
+              {/* 🔴 NEITHER `error.message` NOR `result.error` may be rendered.
+                  The first is the SDK's developer-facing summary; the second is
+                  server-authored and unsanitised, documented as carrying raw
+                  Prisma/pg column and constraint names. This line is why the
+                  earlier "we no longer render the SDK string" claim was not
+                  true of the app — the catches were fixed and this was not.
+                  The budget sniff still READS both; it just never shows them. */}
+              {isInsufficient
+                ? 'Not enough Buzz for this generation.'
+                : 'Generation failed.'}
             </p>
           </div>
         )}
@@ -2334,6 +2333,31 @@ function StyleSheet() {
  * Only the boot state uses this. Once `ready` is true the host's real theme
  * wins, whatever the OS says.
  */
+/**
+ * Viewer-facing text for a RESOLVED failure snapshot.
+ *
+ * 🔴 `snapshot.error` is SERVER-AUTHORED AND UNSANITISED — the SDK documents it
+ * as carrying raw Prisma/pg column and constraint names — so it must never be
+ * rendered, even though this is the path most failures take. A budget refusal,
+ * a velocity limit, a daily cap and a fail-closed deny all RESOLVE with a
+ * `status:'failed'` snapshot rather than throwing, so fixing only the throwing
+ * catches left the common case still leaking.
+ *
+ * The server's words are still READ — the budget sniff keys off
+ * `result.error` — they are just never shown. Where the text is genuinely
+ * actionable we surface it as our own sentence instead.
+ */
+function viewerFailureText(snap: { error?: string | null }): string {
+  const reason = (snap.error ?? '').toLowerCase();
+  if (/insufficient|not enough|budget|balance/.test(reason)) {
+    return 'Not enough Buzz for this generation.';
+  }
+  if (/rate|too many|velocity|limit/.test(reason)) {
+    return 'Too many generations right now — try again shortly.';
+  }
+  return 'This generation failed.';
+}
+
 function bootThemeGuess(): 'dark' | 'light' {
   try {
     // 1. WHAT THE BOOT SCRIPT ALREADY PAINTED WITH. index.html resolves the

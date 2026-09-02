@@ -52,8 +52,15 @@
              first key reproduces the SDK's precedence. */
           var mk = /(^|&)civitai-block=([^&]*)/.exec(h);
           if (mk && mk[2] === 'v1') {
-            var m = /(^|&)theme=(dark|light)(&|$)/.exec(h);
-            if (m) t = m[2];
+            /* Same first-key rule as the marker above, for the same reason:
+               `URLSearchParams.get` returns the FIRST `theme`, so
+               `theme=blue&theme=dark` is `blue` to the SDK — invalid, hence no
+               fast path. A regex that skips the invalid one and matches the
+               later valid one accepts what the SDK refuses, and paints a theme
+               the host never asked for. Fixing only the marker key left this
+               one with the identical defect. */
+            var mt = /(^|&)theme=([^&]*)/.exec(h);
+            if (mt && (mt[2] === 'dark' || mt[2] === 'light')) t = mt[2];
           }
           if (!t) {
             t = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches

@@ -241,6 +241,48 @@ describe('Generation queue (task 3)', () => {
     expect(screen.getByRole('button', { name: 'Advanced settings' })).not.toBeDisabled();
   });
 
+  it('a RESOLVED failed snapshot puts OUR words on the card, not the server\'s', async () => {
+    // 🔴 THE COMMON CASE. A budget refusal, a velocity limit, a daily cap and a
+    // fail-closed deny all RESOLVE with status:'failed' rather than throwing —
+    // so fixing only the throwing catches left `snapshot.error` (server-authored
+    // and unsanitised; the SDK documents it as carrying raw Prisma/pg column and
+    // constraint names) still going straight onto the card.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({
+      workflowId: 'wf_fail',
+      status: 'failed',
+      error: 'insufficient balance for account 12345',
+    } as never);
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByText('Not enough Buzz for this generation.')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/account 12345/)).toBeNull();
+  });
+
+  it('a THROWN workflow-failed submit says something different from a plain exception', async () => {
+    // The SDK is emphatic that the two codes differ on whether money may have
+    // moved, so they must not share a sentence.
+    const { WorkflowSubmitError } = await import('@civitai/blocks-react');
+    const spies = getMockSpies();
+    spies.submit.mockRejectedValue(
+      new WorkflowSubmitError(
+        { workflowId: 'wf', status: 'failed' } as never,
+        'workflow-failed'
+      )
+    );
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByText('This generation failed to start.')).toBeInTheDocument();
+    });
+  });
+
   it('a job that fails to submit becomes a failed card without affecting siblings', async () => {
     const spies = getMockSpies();
     let submitN = 0;

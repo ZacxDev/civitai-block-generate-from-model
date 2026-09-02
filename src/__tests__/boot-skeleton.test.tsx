@@ -452,6 +452,18 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
       expect(ruleFor(theme, '.gfm-boot')).toBe(true);
       expect(ruleFor(theme, '.gfm-boot-bar')).toBe(true);
     }
+    // 🔴 AND THEY MUST BE EFFECTIVE, not merely present. Wrapping all four in
+    // `@media (min-width: 99999px)` leaves them declared with the right colours
+    // and completely inert in every real viewport — and the presence check
+    // above passes. So: the attribute rules must sit at the TOP LEVEL of the
+    // stylesheet, outside any `@media` block.
+    const topLevel = css.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '');
+    for (const theme of ['dark', 'light'] as const) {
+      expect(
+        new RegExp(`\\[data-civitai-boot-theme='${theme}'\\]`).test(topLevel)
+      ).toBe(true);
+    }
+
     // ...and they must carry the SAME colours the media-query/base rules use,
     // or the attribute path and the no-JS path disagree.
     const dark = /\[data-civitai-boot-theme='dark'\]\s+\.gfm-boot\s*\{([^}]*)\}/.exec(css)?.[1] ?? '';
@@ -476,6 +488,11 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     // Order-independence and unknown extra keys must still be accepted.
     expect(runBootScript('#civitai-block=v1&zz=1&theme=dark', false)).toBe('dark');
     expect(parseBlockInitFragment('#civitai-block=v1&zz=1&theme=dark').theme).toBe('dark');
+
+    // The THEME key has the same first-key rule: an invalid first value means
+    // no fast path, not "skip it and take the next one".
+    expect(parseBlockInitFragment('#civitai-block=v1&theme=blue&theme=dark').theme).toBeUndefined();
+    expect(runBootScript('#civitai-block=v1&theme=blue&theme=dark', false)).toBe('light');
 
     // A superstring version must NOT satisfy the v1 gate.
     expect(runBootScript('#civitai-block=v11&theme=light', true)).toBe('dark');

@@ -90,10 +90,56 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
       error: new Error('orchestrator timeout'),
     });
     await renderApp(<App />);
-    // Plain error text in the alert box, no Top-Up CTA, no reframed copy.
-    expect(screen.getByText('orchestrator timeout')).toBeInTheDocument();
+    // 🔴 The RAW error must not reach the alert box. This asserted
+    // `getByText('orchestrator timeout')` — i.e. it pinned the leak. Both
+    // sources behind that line are developer/server text: the hook's message is
+    // the SDK's own summary, and `result.error` is server-authored and
+    // unsanitised (documented as carrying raw Prisma/pg column names).
+    expect(screen.queryByText('orchestrator timeout')).toBeNull();
+    expect(screen.getByText('Generation failed.')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Top up Buzz/ })).not.toBeInTheDocument();
     expect(screen.queryByText('Not enough Buzz for this generation.')).not.toBeInTheDocument();
+  });
+
+  it('a RESOLVED budget refusal still reaches the top-up CTA, without showing the server text', async () => {
+    // 🔴 THE AFFORDABILITY PATH RESOLVES, it does not throw (blocks-react
+    // useBuzzWorkflow). So the server's wording arrives on `result.error`, and
+    // the sniff must read that source FIRST — the hook's `error` is set by any
+    // earlier throw and never cleared, which is what shadowed this.
+    setMockWorkflow({
+      // The HOOK's status is `error`; the SNAPSHOT it carries is the thing with
+      // `status: 'failed'`. They are different enums and mixing them silently
+      // typechecks nowhere useful.
+      status: 'error',
+      result: { workflowId: 'wf', status: 'failed', error: 'insufficient balance' } as never,
+      error: new Error('estimate did not return a usable price (failed)'),
+    });
+    await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    // ...and the raw server sentence is not on screen.
+    expect(screen.queryByText(/insufficient balance/)).toBeNull();
+  });
+
+  it('does not LATCH: a later success clears the top-up CTA and Generate returns', async () => {
+    // 🔴 REGRESSION GUARD. An earlier fix held the failure text in state and
+    // never cleared it, so ONE budget-worded failure pinned the CTA to "Top up"
+    // permanently — measured: after a successful re-estimate the block had NO
+    // Generate button at all. The sniff must be derived from current state, not
+    // remembered.
+    setMockWorkflow({
+      status: 'error',
+      result: { workflowId: 'wf', status: 'failed', error: 'insufficient balance' } as never,
+    });
+    const { rerender } = await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+
+    // The user tops up; the next call succeeds.
+    setMockWorkflow({ status: 'idle', result: null, error: null });
+    rerender(<App />);
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
   });
 
   it('clicking Top-Up calls openPurchaseModal with budget * 10', async () => {

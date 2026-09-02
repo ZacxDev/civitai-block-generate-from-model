@@ -114,6 +114,38 @@ describe('Cost inside the Generate button (delta #1)', () => {
     expect(btn.textContent ?? '').toMatch(/Generate Image \(≤ \d+/);
   });
 
+  it('the estimate error line reads as ONE sentence, not a doubled prefix', async () => {
+    // 🔴 The line renders "Couldn't estimate cost: {estimateError}", so the
+    // stored string must be a REASON. Storing "Couldn't estimate cost." there
+    // produced "Couldn't estimate cost: Couldn't estimate cost." — and the
+    // other assertions could not see it, because they match the PREFIX, which
+    // is satisfied either way. Pin the whole normalised sentence.
+    const { getMockSpies } = await import('../test/test-utils');
+    getMockSpies().estimate.mockReset();
+    getMockSpies().estimate.mockRejectedValue(new Error('network down'));
+    await renderApp(<App />);
+    const line = await screen.findByText(/Couldn't estimate cost:/);
+    expect((line.textContent ?? '').replace(/\s+/g, ' ').trim()).toBe(
+      "Couldn't estimate cost: the estimate service is unavailable — try again in a moment."
+    );
+  });
+
+  it("the no-cost code gets its OWN sentence, not the generic one", async () => {
+    // Two codes, two meanings: 'failed' is the service refusing, 'no-cost' is a
+    // reply with no price. Collapsing them loses the only actionable half.
+    const { getMockSpies } = await import('../test/test-utils');
+    const { WorkflowEstimateError } = await import('@civitai/blocks-react');
+    getMockSpies().estimate.mockReset();
+    getMockSpies().estimate.mockRejectedValue(
+      new WorkflowEstimateError({ workflowId: 'w', status: 'succeeded' } as never, 'no-cost')
+    );
+    await renderApp(<App />);
+    const line = await screen.findByText(/Couldn't estimate cost:/);
+    expect((line.textContent ?? '').replace(/\s+/g, ' ').trim()).toBe(
+      "Couldn't estimate cost: no price came back for these settings."
+    );
+  });
+
   it('renders the Buzz bolt SVG icon inside the Generate button (Tier-4 Delta C)', async () => {
     await renderApp(<App />);
     // The bolt visually ties the action to the Buzz currency. JSDOM
