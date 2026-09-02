@@ -212,10 +212,25 @@ export function App() {
   //
   // Reading a possibly-stale figure is safe BECAUSE of the lifecycle clause in
   // `isSpendLimitRefusal`: the only failures we classify are ones the host
-  // never accepted, so no debit has landed and the last settled read is still
-  // the viewer's real balance. The residual is the harmless direction — a
-  // viewer who topped up in another tab while a refetch is in flight may be
-  // offered a top-up they no longer need.
+  // never accepted, so THIS job's own price has not been debited.
+  //
+  // 🔴 THAT IS A CLAIM ABOUT THIS JOB, NOT ABOUT THE WALLET. The stale figure
+  // can be wrong in BOTH directions, because a SIBLING job — or another tab, or
+  // another block — can debit between the last settled read and this decision:
+  //   - stale LOW (a top-up landed elsewhere) → we may offer a top-up the
+  //     viewer no longer needs. Harmless.
+  //   - stale HIGH (a sibling accepted job debited) → we may MISS a real
+  //     shortfall. Viewer at 100, job A accepted at 60 and still polling, job
+  //     B's submit replies `failed` priced 60: the stored balance is still 100,
+  //     `100 >= 60`, so no shortfall is seen and no top-up is offered even
+  //     though the wallet holds 40.
+  // The second is the direction that costs the viewer something, and it is
+  // unfixable from here — a figure read before a debit cannot know about it.
+  // It is accepted deliberately: it lands on the FAIL-TOWARD-NOT-A-SHORTFALL
+  // side of `isSpendLimitRefusal`'s 🔴 rule, whose whole point is that a missed
+  // top-up costs an unhelpful error message while a wrong one sells Buzz for a
+  // problem money cannot solve. Every terminal transition refetches, so the
+  // window closes on its own at the next settle.
   const knownBuzzBalance = buzzBalance;
   const spend: SpendContext = {
     balance: knownBuzzBalance,
@@ -238,6 +253,31 @@ export function App() {
   // refund on a non-throwing failed snapshot" — `useBuzzWorkflow`). Membership
   // is written at exactly ONE site (the submit reply) and read by both
   // classification sites, so the two cannot disagree about whether a job ran.
+  //
+  // 🔴 WHAT THE TWO READS ACTUALLY CARRY, MEASURED — this comment used to imply
+  // they carry a decision each, and they do not. Hardcoding the poll site's
+  // `accepted` to `true` and the submit site's to `false` each leaves the whole
+  // suite green, because both are INVARIANT:
+  //   - poll site: `runJobPollLoop` is started from exactly one place, under
+  //     `!JOB_TERMINAL.has(snap.status)`, and `'failed'` is in `JOB_TERMINAL` —
+  //     so a job that reaches a poll loop is one the `!== 'failed'` add already
+  //     put in the set. Membership there is always `true`.
+  //   - submit site: membership is `true` exactly when `snap.status !== 'failed'`,
+  //     and `isSpendLimitRefusal`'s own second clause returns `false` on that
+  //     same condition. The read is REDUNDANT with the predicate, not wrong.
+  // What IS pinned (8 tests) is the add condition at the submit reply: inverting
+  // it marks genuine refusals as accepted, and the lifecycle clause then swallows
+  // every real shortfall. So the set's value is the single DERIVATION, not the
+  // reads: it is what keeps the poll site correct if a second caller of
+  // `runJobPollLoop` ever appears for a job the host did not accept, and what
+  // keeps the invariant checkable instead of restated as a literal at each read.
+  //
+  // Entries are never removed — neither `dismissJob` nor the `MAX_RESULTS` FIFO
+  // eviction clears one. That is deliberate: a poll loop can outlive its card
+  // (eviction does not cancel it), and dropping an entry a live loop still reads
+  // would flip its verdict from "accepted, so not a money problem" to arithmetic
+  // over a post-debit balance — round 6's F1, reintroduced. The cost of keeping
+  // them is one ~25-byte string per generation for the life of the mount.
   const jobAcceptedRef = useRef<Set<string>>(new Set());
   // Tier-4 Delta A: rootRef is the outer (unpadded) measurement element
   // for useBlockResize. The SDK hook reads `ResizeObserverEntry.contentRect.height`
@@ -312,10 +352,22 @@ export function App() {
   // snapshot. Storing the verdict removes the disagreement by construction.
   //
   // Semantics: this describes the MOST RECENT decision, exactly as the hook's
-  // shared `result` did. A later decision — a successful re-estimate, another
-  // job settling — replaces it. With several jobs in flight it therefore
-  // describes whichever settled last, which is the same residual the shared
-  // `result` had and is why every job card carries its own copy too.
+  // shared `result` did. With several jobs in flight it therefore describes
+  // whichever DECIDED last, which is the same residual the shared `result` had
+  // and is why every job card carries its own copy too.
+  //
+  // 🔴 A "DECISION" IS EXACTLY FOUR WRITE SITES, and this comment used to say
+  // "another job settling replaces it", which is wider than the code: the
+  // estimate settle (resolved → clears, rejected → classifies the thrown
+  // snapshot), the submit reply, a submit throw THAT CARRIES A SNAPSHOT, and the
+  // poll loop's terminal branch. `cancelJob` is NOT one of them, though it is a
+  // terminal transition and does fire the balance refetch. So a `canceled`
+  // status the SERVER reports arrives through the poll loop and clears the
+  // verdict, while a `canceled` the USER presses leaves it standing until the
+  // next of the four. That asymmetry is intentional — a user cancel is not new
+  // information about affordability — but it is not "any job settling".
+  // Symmetrically, a snapshot-less submit throw (a transport timeout) is
+  // deliberately NOT a decision; see the catch in `handleGenerate`.
   const [spendLimited, setSpendLimited] = useState(false);
   // Estimated cost (yellow buzz) for the current params. Pulled from
   // estimate() snapshot, refreshed on mount + when the model identity
@@ -1043,15 +1095,55 @@ export function App() {
       // start showing "submit did not return a usable workflow
       // (workflow-failed) — reason on .snapshot.error" to a user. Branch on
       // `code`; the server's text goes to the console only.
-      // 🔴 A THROWN submit is NEVER an affordability refusal, so it clears the
-      // verdict rather than leaving an earlier decision's on screen. The SDK
-      // states it directly — "A BUDGET REJECTION NEVER ARRIVES HERE. It
+      // 🔴 ONLY A THROW THAT CARRIES A SNAPSHOT MAY MOVE THE VERDICT, and it
+      // moves it by CLASSIFYING that snapshot — never by asserting an answer.
+      //
+      // This used to be an unconditional `setSpendLimited(false)`, justified
+      // from `WorkflowSubmitError`: "A BUDGET REJECTION NEVER ARRIVES HERE. It
       // resolves, and is read off the returned snapshot as `status === 'failed'`
-      // with a numeric `cost.total`" — and both thrown codes carry an unpriced
-      // snapshot, which the predicate would reject anyway.
-      setSpendLimited(false);
-      const submitReason =
-        err instanceof WorkflowSubmitError ? err.snapshot?.error : undefined;
+      // with a numeric `cost.total`" — and both thrown codes carry an UNPRICED
+      // snapshot, which the predicate rejects anyway. All true, and all about
+      // the two codes. THE CATCH IS NOT SCOPED TO THEM. `submit()` also rejects
+      // at the TRANSPORT — `sendTypedRequest` hitting `WORKFLOW_REQUEST_TIMEOUT_MS`,
+      // or a dead bridge — and that path never reaches the hook's
+      // `setResult(snapshot)`. No snapshot is published and none is thrown, so
+      // the stored verdict is the ONLY information the app holds about the
+      // money, and clearing it destroyed a live, correct answer:
+      //
+      //   viewer holds 5, a priced `failed` estimate at 42 stores the verdict →
+      //   "Top up · 500", the spend-limit copy, no Generate button. The CTA is
+      //   not a gate: `PromptTextarea` is mounted `disabled={false}`, so
+      //   Ctrl/Cmd+Enter reaches this handler anyway. `submit()` rejects at the
+      //   transport, this line fires — top-up gone, copy gone, Generate back,
+      //   card reading "Couldn't submit this generation." The viewer is still
+      //   37 Buzz short with no top-up affordance, and Generate fails again.
+      //
+      // A snapshot-less throw settled nothing and priced nothing, so it carries
+      // no decision: leave the last one standing. A throw that DOES carry a
+      // snapshot is a decision, and the one predicate makes it — for the same
+      // reason the resolved path does, so a change in what the SDK throws
+      // cannot silently turn into a wrong hardcoded answer here.
+      //
+      // ⚠️ THAT SECOND HALF IS NOT TEST-PINNED, deliberately. Replacing the
+      // predicate call below with a literal `false` SURVIVES the whole suite,
+      // and no honest fixture can kill it: `submit()` throws only under
+      // `status === 'failed' && typeof cost?.total !== 'number'`, so every
+      // snapshot that can reach this line is UNPRICED and the predicate answers
+      // `false` for all of them. For every shape the SDK can actually throw, this
+      // block produces exactly the answer the old unconditional clear did — the
+      // only behaviour that changed is the snapshot-LESS throw above. Calling
+      // the predicate anyway costs nothing and removes the dependency on a
+      // reading of the SDK's throw conditions that was already wrong once.
+      const thrownSnapshot =
+        err instanceof WorkflowSubmitError ? err.snapshot ?? null : null;
+      if (thrownSnapshot) {
+        setSpendLimited(
+          isSpendLimitRefusal(thrownSnapshot, spendRef.current, {
+            accepted: jobAcceptedRef.current.has(localId),
+          })
+        );
+      }
+      const submitReason = thrownSnapshot?.error;
       // eslint-disable-next-line no-console
       console.warn('[gfm] submit rejected', {
         localId,

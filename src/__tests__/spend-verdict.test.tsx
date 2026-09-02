@@ -41,7 +41,7 @@ import {
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
 
-import { WorkflowEstimateError } from '@civitai/blocks-react';
+import { WorkflowEstimateError, WorkflowSubmitError } from '@civitai/blocks-react';
 
 import { App } from '../App';
 
@@ -326,10 +326,20 @@ describe('a refusal is priced against the balance as of the REFUSAL, not as of m
     // mount. This is that guard's killing case: the viewer could afford 42 at
     // mount and cannot by the time the refusal arrives.
     //
-    // It is also the harness's own positive control. If `setMockBuzzBalance`
-    // did not re-render a mounted `useBuzzBalance()`, this test could not pass
-    // at all — which is what makes F1's "the component never saw the new
-    // figure" escape route unavailable.
+    // 🔴 THIS TEST IS NOT A POSITIVE CONTROL ON THE HARNESS, and the comment
+    // that used to sit here said it was: "If `setMockBuzzBalance` did not
+    // re-render a mounted `useBuzzBalance()`, this test could not pass at all."
+    // MEASURED FALSE in round 7 — making `notifyBalance()` a global no-op, i.e.
+    // deleting the entire `balanceListeners`/`useState` bump/`useEffect`
+    // subscribe apparatus, fails 0 of 184 tests, this one included. It passes
+    // because `clickGenerate` mints a queue card, and THAT `setQueue` forces the
+    // render which refreshes `spendRef.current` — the balance move is picked up
+    // by a render the click would have caused anyway. A comment telling the next
+    // reader an escape route is closed while it is open is worse than none.
+    //
+    // The real pin is
+    // `🔴 HARNESS PIN — an out-of-band balance move must re-render on its own`
+    // below, which moves the balance with NO other render trigger available.
     const spies = getMockSpies();
     setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 500 } }); // covers 42
     await renderApp(<App />);
@@ -351,6 +361,226 @@ describe('a refusal is priced against the balance as of the REFUSAL, not as of m
     await waitFor(() =>
       expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
     );
+    expect(
+      screen.getAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(2);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ *  ROUND 7
+ * ------------------------------------------------------------------ */
+
+describe('R7 F1 — a submit throw that settled NOTHING must not wipe a live verdict', () => {
+  /**
+   * Put the app in a real, correct spend-limit state via the estimate path,
+   * then freeze the estimate so no re-quote can restore the verdict behind our
+   * back (the `isRegenerate` flip re-quotes after every submit, which is why
+   * the defect is intermittent rather than always-on).
+   */
+  const arriveAtRefusedState = async () => {
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.estimate.mockRejectedValue(
+      new WorkflowEstimateError(
+        { workflowId: 'wf_est', status: 'failed', cost: { total: PRICE } } as never,
+        'failed'
+      )
+    );
+    await renderApp(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+    freezeEstimate();
+    return spies;
+  };
+
+  /** Ctrl+Enter on the prompt — the path that reaches `handleGenerate` while the CTA is swapped out. */
+  const ctrlEnter = async () => {
+    await userEvent.click(screen.getByLabelText('Prompt (optional)'));
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
+  };
+
+  it('🔴 a TRANSPORT-level submit rejection leaves the stored verdict standing', async () => {
+    // 🔴 THE ROUND-6 REGRESSION, in the numbers it was reported in. The viewer
+    // holds 5 and the quote is 42, so the estimate refusal is a genuine,
+    // top-up-fixable shortfall: "Top up · 500", the spend-limit copy, no
+    // Generate button. The CTA is NOT a gate — `PromptTextarea` is mounted
+    // `disabled={false}`, so Ctrl/Cmd+Enter reaches `handleGenerate` anyway.
+    //
+    // `submit()` then rejects at the TRANSPORT (`sendTypedRequest` hitting
+    // `WORKFLOW_REQUEST_TIMEOUT_MS`, or a dead bridge). That path never reaches
+    // the hook's `setResult(snapshot)` — no snapshot is published and none is
+    // carried on the error — so nothing whatsoever was decided. The catch's
+    // unconditional `setSpendLimited(false)` nonetheless wiped the top-up, the
+    // copy and the gate, leaving a viewer 37 Buzz short staring at a Generate
+    // button that fails identically and no way to buy the Buzz that would fix it.
+    const spies = await arriveAtRefusedState();
+    spies.submit.mockRejectedValue(new Error('bridge request timed out'));
+
+    await ctrlEnter();
+    await waitFor(() => expect(spies.submit).toHaveBeenCalled());
+    // POSITIVE CONTROL: prove we are in the catch at all. Without this the
+    // assertions below are equally happy if the keystroke never submitted.
+    await waitFor(() =>
+      expect(screen.getByText("Couldn't submit this generation.")).toBeInTheDocument()
+    );
+    // 🔴 PIN THE PROPERTY THE FIX TURNS ON, not just the outcome: what came out
+    // of `submit()` is NOT a `WorkflowSubmitError`, so it carries no `snapshot`
+    // and the SDK's "a budget rejection never arrives here" reasoning — which is
+    // the entire justification for the unconditional clear — never applied to it.
+    await expect(spies.submit.mock.results[0]?.value).rejects.toBeInstanceOf(Error);
+    await expect(spies.submit.mock.results[0]?.value).rejects.not.toBeInstanceOf(
+      WorkflowSubmitError
+    );
+
+    // All four user-visible parts of the verdict, still there.
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
+    expect(screen.queryByText('Generation failed.')).toBeNull();
+  });
+
+  it('a submit throw that DOES carry a snapshot still re-decides the verdict', async () => {
+    // ⚠️ INVARIANT GUARD, NOT REGRESSION COVERAGE — this passes on pre-change
+    // code too, where the unconditional `setSpendLimited(false)` produced the
+    // same screen. It exists so the fix cannot be "stop writing the verdict in
+    // the catch at all": a `WorkflowSubmitError` carries the host's snapshot,
+    // which IS a decision, and the one predicate must make it. Both thrown codes
+    // carry an UNPRICED snapshot, so the predicate answers `false` and the
+    // verdict clears — but it clears because the rule said so, not because a
+    // literal was typed here.
+    const spies = await arriveAtRefusedState();
+    spies.submit.mockRejectedValue(
+      new WorkflowSubmitError(
+        { workflowId: 'failed', status: 'failed' } as never,
+        'exception'
+      )
+    );
+
+    await ctrlEnter();
+    await waitFor(() => expect(spies.submit).toHaveBeenCalled());
+
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull()
+    );
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
+  });
+});
+
+describe('R7 F2 — the harness mechanisms the money tests rest on, actually pinned', () => {
+  it('🔴 HARNESS PIN — an out-of-band balance move must re-render on its own', async () => {
+    // ⚠️ INVARIANT GUARD ON THE HARNESS, not regression coverage on the app: it
+    // passes at HEAD and at the base. Its job is to be the killing case for a
+    // mutation that the whole suite otherwise survives — making `notifyBalance()`
+    // a no-op, i.e. deleting `balanceListeners` + the `useState` bump + the
+    // `useEffect` subscribe that round 6 added to `test-utils`. That apparatus
+    // exists so the mock matches the REAL `useBuzzBalance`, which re-renders its
+    // consumers when its own state moves; without it the mock silently freezes
+    // the balance at whatever the last unrelated render saw.
+    //
+    // Every other balance test lets a click, a card mint or a showcase pick
+    // force the render, so the mechanism is never the reason they pass. Here the
+    // balance moves while `submit()` is in flight — after the click's render,
+    // before the reply — so NOTHING else can re-render, and the verdict is
+    // classified from `spendRef.current`, which only a re-render refreshes.
+    //
+    // 🔴 It asserts on RENDERED OUTPUT (the Top-up button), never on
+    // `getMockBuzzBalance()`. Reading the module record is what made the comment
+    // this replaces vacuous: the record moves whether or not React ever saw it.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 500 } }); // covers 42
+    let releaseSubmit: (snap: unknown) => void = () => {};
+    const submitSettled = new Promise((res) => {
+      releaseSubmit = res;
+    });
+    spies.submit.mockImplementation(() => submitSettled);
+
+    await renderApp(<App />);
+    freezeEstimate();
+    await clickGenerate();
+    // In flight: the card is minted, the reply has not arrived.
+    await waitFor(() => expect(spies.submit).toHaveBeenCalled());
+
+    // The wallet empties elsewhere — another tab, another block, a sibling job.
+    // No click, no card, no showcase change: the ONLY thing that can tell React
+    // is the mock's own listener set.
+    await act(async () => {
+      setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    });
+
+    // Now the reply lands: a genuine refusal, priced 42, never queued.
+    await act(async () => {
+      releaseSubmit({
+        workflowId: 'failed',
+        status: 'failed',
+        error: 'spend cap exceeded',
+        cost: { total: PRICE },
+      });
+      await submitSettled;
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+    expect(
+      screen.getAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(2);
+  });
+
+  it('🔴 HARNESS PIN — a FAILED refetch keeps the last good balance, and the next decision uses it', async () => {
+    // ⚠️ INVARIANT GUARD ON THE HARNESS. `setMockBuzzBalanceRefetch`'s docstring
+    // claims it "mirrors the REAL `useBuzzBalance` exactly", including "on
+    // failure it sets `error` and clears `loading`, LEAVING the previous
+    // `balance` in place — the hook never nulls a value it once fetched".
+    // Measured in round 7: making the failed branch NULL the balance fails 0 of
+    // 184 tests. The existing `(b)` case above cannot see it, because the verdict
+    // it asserts on was already STORED before the refetch failed — the balance is
+    // irrelevant to it by then.
+    //
+    // The property only becomes observable at the NEXT decision, which is priced
+    // against whatever the balance is then. So: refuse once (verdict stored,
+    // refetch fires and fails), then refuse AGAIN through the estimate path. A
+    // mock that nulled the balance on failure would hand the predicate `null`,
+    // which fails toward NOT-a-shortfall, and the top-up would vanish for a
+    // viewer who is still short.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    setMockBuzzBalanceRefetch({ kind: 'fails', error: new Error('host refused') });
+    spies.submit.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: PRICE },
+    } as never);
+
+    await renderApp(<App />);
+    freezeEstimate();
+    await clickGenerate();
+
+    // The refetch really did fire and really did fail — assert it, don't assume.
+    await waitFor(() => expect(getMockBuzzBalance().error).not.toBeNull());
+    expect(spies.refetchBuzzBalance).toHaveBeenCalled();
+
+    // A SECOND decision, from the estimate path, priced against whatever the
+    // balance is now. Nothing else changed: the viewer still holds 5.
+    spies.estimate.mockRejectedValue(
+      new WorkflowEstimateError(
+        { workflowId: 'wf_est2', status: 'failed', cost: { total: PRICE } } as never,
+        'failed'
+      )
+    );
+    await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
+
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+    // Both consumers of the one verdict — the CTA's copy and the job card's.
     expect(
       screen.getAllByText('This generation hit a Buzz spend limit.')
     ).toHaveLength(2);
