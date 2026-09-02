@@ -987,8 +987,13 @@ describe('R9 F1 — a verdict about a 42 quote does not survive the viewer makin
     await userEvent.keyboard('a cat');
     await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
     // Toggling the seed is a price change the block deliberately does NOT treat
-    // as a subject change: it only ever moves the price UP, so it can never make
-    // a refused configuration affordable.
+    // as a subject change. 🔴 The reason written here in round 9 — "it only ever
+    // moves the price UP" — was FALSE and is corrected in round 10: 🎲 is a
+    // toggle, and cancelling it moves the price back DOWN. The decision stays
+    // out of the key because both its flags flip as a side effect of SUBMITTING,
+    // so keying on either would retire the verdict at the instant the submit
+    // reply sets it. The PRESS direction asserted here is still not a subject
+    // change; the CANCEL direction is the hole named on `spendSubjectKey`.
     await userEvent.click(screen.getByRole('button', { name: /🎲 random/ }));
 
     await waitFor(() =>
@@ -1089,6 +1094,211 @@ describe('R9 F1b — the subject is stamped at KICKOFF, so a slow quote cannot c
     // The claim: that refusal priced Steps=28. The screen is Steps=5.
     expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
     expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    expect(spies.openPurchaseModal).not.toHaveBeenCalled();
+  });
+});
+
+describe('R10 F1 — the seed VALUE is cost-bearing, so it is part of the subject', () => {
+  it('🔴 clearing a typed seed back to the showcase value retires the stale refusal', async () => {
+    // 🔴 THE SEED PRICES, AND ROUND 9 LEFT IT OUT OF BOTH HALVES.
+    // `buildSubmitParams` resolves `overrides.seed ?? showcase.seed` into the
+    // estimate payload, and the block's own pricing rule is that the showcase's
+    // cached seed whatifs to 0 while anything else is a fresh job at full cost.
+    // So a typed seed moves the price exactly the way the randomize decision
+    // does — and at 4459967 `overrides.seed` was in NEITHER the subject key NOR
+    // either estimate effect's deps.
+    //
+    // The measured screen at 4459967: the viewer types a seed, gets a priced
+    // refusal, then clears the field back to the showcase value. The key never
+    // moves, so the verdict still applies; and NOTHING re-quotes, so no
+    // replacement is even scheduled. Top-up CTA, no Generate button, over a
+    // configuration the block has never priced as unaffordable. Unlike round 9's
+    // repro this needs no bridge outage to reach — zero re-quotes fire either
+    // way.
+    //
+    // This test pins BOTH halves, because either alone is a defect: the key
+    // alone would retire the verdict with nothing scheduled to replace it, and
+    // the re-quote alone would leave the stale verdict standing whenever that
+    // re-quote fails at the transport (which is exactly the arm asserted here).
+    setMockSettings({ show_advanced: true });
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.estimate.mockResolvedValue({
+      workflowId: 'wf_quote',
+      status: 'pending',
+      cost: { total: PRICE },
+    } as never);
+    spies.submit.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: PRICE },
+    } as never);
+
+    await renderApp(<App />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Generate Image · 42/ })
+      ).toBeInTheDocument()
+    );
+
+    // Type a seed the showcase does not carry (showcase[0].seed is 12345). This
+    // is the configuration the refusal below will be ABOUT.
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
+    fireEvent.change(screen.getByLabelText('Seed'), { target: { value: '999' } });
+
+    // POSITIVE CONTROL ON THE PAYLOAD, not on the UI: the seed the block sends
+    // really does change with the field, so "the seed prices" is a measurement
+    // of what leaves this block rather than a claim about the orchestrator.
+    await waitFor(
+      () => {
+        const last = spies.estimate.mock.calls.at(-1)![0] as {
+          params: { seed?: number };
+        };
+        expect(last.params.seed).toBe(999);
+      },
+      { timeout: 1500 }
+    );
+
+    // Freeze the post-submit re-quote so the refused window is a state, not a
+    // race — a SUCCESSFUL estimate clears the verdict on purpose.
+    freezeEstimate();
+    await clickGenerate();
+
+    // A genuine, correct refusal, priced 42 against a balance of 5.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+    expect(
+      screen.getAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(2);
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
+
+    // The viewer clears the seed back to the showcase's own value — a price
+    // change DOWNWARD (fresh job → cache hit) — and the bridge is down, so the
+    // re-quote this now schedules rejects at the TRANSPORT with a plain `Error`
+    // and, by round 8's rule, writes nothing.
+    spies.estimate.mockRejectedValue(new Error('bridge request timed out'));
+    fireEvent.change(screen.getByLabelText('Seed'), { target: { value: '' } });
+
+    // POSITIVE CONTROL — half two of the fix. At 4459967 a seed edit fired ZERO
+    // re-quotes, so this message never appeared at all. Without this assertion
+    // the CTA claim below would pass just as happily on a key-only change that
+    // schedules nothing.
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText(
+            "Couldn't estimate cost: the estimate service is unavailable — try again in a moment."
+          )
+        ).toBeInTheDocument(),
+      { timeout: 1500 }
+    );
+    // 🔴 PIN THE PROPERTY: what came out of `estimate()` carries no snapshot, so
+    // round 8's guard correctly declined to write. The verdict is retired by the
+    // SUBJECT changing, not by the rejection — the same discrimination round 9
+    // made for width/height/steps.
+    const lastEstimate = spies.estimate.mock.results.at(-1)?.value;
+    await expect(lastEstimate).rejects.toBeInstanceOf(Error);
+    await expect(lastEstimate).rejects.not.toBeInstanceOf(WorkflowEstimateError);
+
+    // The claim. The stored answer was about the seed-999 configuration; this is
+    // not that configuration, so it does not apply.
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    // Exactly one, not zero — the JOB CARD keeps its sentence, because it is a
+    // record of a decision that was correct when it was made.
+    expect(
+      screen.queryAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(1);
+    expect(spies.openPurchaseModal).not.toHaveBeenCalled();
+  });
+});
+
+describe('R10 F2 — the SUBMIT site stamps its verdict at KICKOFF, not at settle', () => {
+  it('a refusal that settles after the params moved does not attach itself to the new params', async () => {
+    // ⚠️ INVARIANT GUARD, NOT REGRESSION COVERAGE — green at 4459967, where
+    // `submitSubjectKey` already captures the key before the awaits. It exists
+    // because round 9 added the equivalent guard for the ESTIMATE site (R9 F1b)
+    // after that site's mutation survived, wrote the same rule at the submit
+    // site, and added no guard there. Mutating the submit stamp to settle-time
+    // (`spendKeyRef.current`) SURVIVED all 195 tests at 4459967, so the rule was
+    // asserted only by a comment.
+    //
+    // The behaviour it covers is real: click Generate at Steps=30, move Steps to
+    // 5 while the submit is in flight, and the reply is a priced refusal against
+    // the SUBMITTED configuration. Stamped at kickoff it names Steps=30, which is
+    // no longer on screen, so no CTA appears. Stamped at settle it names Steps=5
+    // — a configuration this refusal was never about, and one the block has
+    // never quoted — and the viewer is asked to buy Buzz for it.
+    setMockSettings({ show_advanced: true });
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.estimate.mockResolvedValue({
+      workflowId: 'wf_quote',
+      status: 'pending',
+      cost: { total: PRICE },
+    } as never);
+
+    // A submit we hold open, so the param edit lands strictly between kickoff
+    // and settle — the only window in which the two stamps differ.
+    let settleSubmit!: (snap: unknown) => void;
+    spies.submit.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          settleSubmit = resolve;
+        })
+    );
+
+    await renderApp(<App />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Generate Image · 42/ })
+      ).toBeInTheDocument()
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
+
+    // Freeze the estimate so the ONLY writer of the verdict in this test is the
+    // submit reply. A successful re-quote would clear it and mask both stamps.
+    freezeEstimate();
+    await clickGenerate();
+    await waitFor(() => expect(spies.submit).toHaveBeenCalledTimes(1));
+
+    // The submitted configuration really was Steps=30 (showcase[0]).
+    const submitted = spies.submit.mock.calls.at(-1)![0] as {
+      params: { steps?: number };
+    };
+    expect(submitted.params.steps).toBe(30);
+
+    // The viewer moves a cost-bearing param while the submit is still open.
+    fireEvent.change(screen.getByLabelText('Steps'), { target: { value: '5' } });
+
+    // Now the refusal lands — about Steps=30, not about what is on screen.
+    await act(async () => {
+      settleSubmit({
+        workflowId: 'failed',
+        status: 'failed',
+        error: 'spend cap exceeded',
+        cost: { total: PRICE },
+      });
+    });
+
+    // The job card records the decision that was made...
+    await waitFor(() =>
+      expect(
+        screen.getAllByText('This generation hit a Buzz spend limit.')
+      ).toHaveLength(1)
+    );
+    // ...but the CTA does not, because the verdict is not about this
+    // configuration. Under the settle-time mutant both of these invert.
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
     expect(
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     ).toBeInTheDocument();

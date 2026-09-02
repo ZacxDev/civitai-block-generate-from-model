@@ -261,10 +261,19 @@ export function App() {
   const spendRef = useRef(spend);
   spendRef.current = spend;
   // Same device for the money verdict's SUBJECT key (see `spendLimitedForKey`).
-  // The poll loop is a `useCallback([])` created above the key's own
-  // definition, so it reads the key through this ref at settle time; the two
-  // render-body classification sites close over the value directly, which is
-  // stricter — see the notes at each.
+  // The poll loop is a `useCallback(…, [patchJob])` created above the key's own
+  // definition, so it reads the key through this ref at settle time. It is
+  // stable in PRACTICE, not by its dep list — `patchJob` is itself a
+  // `useCallback(…, [])` — and that is the whole reason the ref is needed.
+  // The other THREE of the four classification sites (estimate `.catch`, submit
+  // `.then`, submit `.catch`) are render-body closures that capture the key
+  // value directly, which is stricter — see the notes at each.
+  //
+  // 🔴 The write below is a REF WRITE DURING RENDER, so a render React discards
+  // still stamps it. Inert today: the only reader is the poll loop's `refused`
+  // arm, which is structurally dead (an accepted job can never be refused). If
+  // that arm is ever made live, carry the submitted-under key down from
+  // `handleGenerate` as the note there says — do not start trusting this ref.
   const spendKeyRef = useRef('');
   const refetchBalanceRef = useRef(refetchBuzzBalance);
   refetchBalanceRef.current = refetchBuzzBalance;
@@ -654,24 +663,44 @@ export function App() {
   // 🔴 THE MONEY VERDICT'S SUBJECT — the cost-bearing configuration a quote is
   // priced against. See `spendLimitedForKey`.
   //
-  // 🔴 IT IS A SUBSET OF THE TWO ESTIMATE EFFECTS' DEPS BY CONSTRUCTION, and
-  // that is the whole safety argument: every field here also fires a re-quote
-  // (identity effect → model/checkpoint/showcase; debounced effect →
-  // width/height/steps). So a key change can never leave the block with a
-  // retired verdict and nothing scheduled to replace it — the quote that
-  // retires it is already in flight. If you add a field, add it to an estimate
-  // effect's deps in the same edit, or you have built the wipe back.
+  // 🔴 IT IS A SUBSET OF THE TWO ESTIMATE EFFECTS' DEPS BY CONSTRUCTION: every
+  // field here also fires a re-quote (identity → model/checkpoint/showcase;
+  // debounced → width/height/steps/seed). Add a field here, add it to an
+  // estimate effect's deps in the same edit, or you have built the wipe back.
+  // But what that buys is SCHEDULED, not in flight — round 9's "a key change can
+  // never leave the block with a retired verdict and nothing scheduled" claimed
+  // the stronger thing and it does not hold. The debounced path is a 400ms
+  // `setTimeout` re-armed on every keystroke, and `runEstimateNow` has four
+  // early returns before it reaches `estimate()`; one of them
+  // (`!effectiveCheckpointVersionIdForEstimate`) is ITSELF a key field, so a
+  // checkpoint going null retires a verdict and quotes nothing at all. A retired
+  // verdict can be briefly — or indefinitely — unreplaced.
   //
-  // 🔴 WHAT IS DELIBERATELY OUT, AND THE TRADE, IN BOTH DIRECTIONS. The seed
-  // decision (`randomizeSeedOnce` / `isRegenerate`) prices too — a randomized
-  // seed is a fresh job at full cost, the showcase's cached seed whatifs to 0 —
-  // and it is still not a subject change, for two independent reasons. It only
-  // ever moves the price UP, so it cannot turn a refused configuration into an
-  // affordable one; and `isRegenerate` flips on EVERY submit, so keying on it
-  // would retire the verdict at the exact instant the submit reply set it —
-  // round 8's F1 (a live, correct verdict wiped by an event that decided
-  // nothing) rebuilt out of the fix for its mirror. The prompt is out for the
-  // simpler reason that it does not price and does not re-quote.
+  // 🔴 THE SEED PRICES. `buildSubmitParams` resolves `overrides.seed ??
+  // showcase.seed` and then lets a randomize decision drop the key entirely, so
+  // BOTH seed inputs move the quote between the showcase's cache-hit 0 and a
+  // fresh job at full cost. They are not interchangeable here:
+  //   - The seed VALUE (`overrides.seed`) is in the key, and the debounced
+  //     effect re-quotes it. Only a viewer edit ever changes it, so it is safe
+  //     to key on. Before this it was in NEITHER, which is the hole: typing a
+  //     seed moved the price and fired zero re-quotes, so clearing it back to
+  //     the showcase value left a refusal verdict standing over an affordable
+  //     configuration with nothing scheduled to retire it.
+  //   - The seed DECISION (`randomizeSeedOnce` / `isRegenerate`) stays out, but
+  //     NOT for the reason this comment used to give. "It only ever moves the
+  //     price UP" is false: 🎲 is a toggle (see `onUndoRandomize`), and
+  //     cancelling it moves the price back DOWN. The real reason is that both
+  //     flags flip as a SIDE EFFECT of submitting, so keying on either retires
+  //     the verdict at the instant the submit reply sets it — round 8's F1
+  //     rebuilt. Measured, not argued: the resolved decision in this key turns
+  //     13 tests red, round 8's F1 and round 6's flicker guard among them.
+  //   - So one hole is left OPEN and named: a 🎲 press that is refused and then
+  //     CANCELLED keeps its stale top-up CTA until some later quote lands,
+  //     because the key cannot see the cancel. Closing it needs the seed
+  //     decision to stop riding on submit — not another rule about when the
+  //     verdict may be written.
+  // The prompt is out for the simpler reason that it does not price and does
+  // not re-quote.
   //
   // The cost of retiring, named: a viewer whose NEW configuration is also
   // unaffordable loses the top-up CTA until the re-quote lands, and keeps
@@ -687,13 +716,17 @@ export function App() {
     overrides.width ?? null,
     overrides.height ?? null,
     overrides.steps ?? null,
+    overrides.seed ?? null,
   ]);
   spendKeyRef.current = spendSubjectKey;
   // 🔴 NOT A RE-DERIVATION OF THE VERDICT — an APPLICABILITY test on the one
   // that was stored. Nothing here reads the balance or a snapshot, so round 6's
   // F1 (the CTA re-classifying a decided failure against a balance that moved
   // underneath it) cannot come back through this line. Do not add either.
-  const spendLimited = spendLimitedForKey !== null && spendLimitedForKey === spendSubjectKey;
+  // The `!== null` half this used to carry was unreachable — `spendSubjectKey` is
+  // always a `JSON.stringify` array, so it can never equal `null` — and a dead
+  // clause is a place a future mutation kill gets attributed to the wrong half.
+  const spendLimited = spendLimitedForKey === spendSubjectKey;
 
   // Storage key for showcase-selection persistence. Scoped to the block
   // instance + model version so two different models on a multi-model
@@ -954,13 +987,19 @@ export function App() {
     randomizeSeedOnce,
   ]);
 
-  // Debounced re-estimate on cost-bearing advanced overrides (width,
-  // height, steps — these scale the orchestrator price). 400ms so
-  // dragging a dimension or holding a key in the steps field coalesces
-  // into one round-trip instead of one per keystroke. Reading the
-  // individual fields (not the `overrides` object) keeps no-cost edits
-  // (negativePrompt, sampler, cfg, seed, clipSkip) from re-quoting.
+  // Debounced re-estimate on the cost-bearing advanced overrides. 400ms so
+  // dragging a dimension or holding a key in a numeric field coalesces into one
+  // round-trip instead of one per keystroke. Reading the individual fields (not
+  // the `overrides` object) keeps the no-cost edits (negativePrompt, sampler,
+  // cfg, clipSkip) from re-quoting.
   // Skips the first mount — the identity effect above already quoted.
+  //
+  // 🔴 `seed` IS COST-BEARING AND USED TO BE LISTED ABOVE AS A NO-COST EDIT.
+  // It does not scale the price the way width/height/steps do; it moves it
+  // between the showcase's cache-hit 0 and a fresh job at full cost, which is
+  // the same axis the randomize decision moves and just as real. See the seed
+  // paragraph on `spendSubjectKey` — that key and this dep list are the two
+  // halves of one fix and must be edited together.
   useEffect(() => {
     if (!overrideEstimateMountedRef.current) {
       overrideEstimateMountedRef.current = true;
@@ -970,7 +1009,7 @@ export function App() {
     const timer = setTimeout(runEstimateNow, 400);
     return () => clearTimeout(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [overrides.width, overrides.height, overrides.steps]);
+  }, [overrides.width, overrides.height, overrides.steps, overrides.seed]);
 
   // Whether any queued job is still running. Drives the leftmost-scroll
   // affordance and (in render) the carousel mount.
