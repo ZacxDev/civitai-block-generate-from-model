@@ -347,7 +347,14 @@ export function App() {
             status: snap.status as QueueJobStatus,
             cost: snap.cost?.total ?? null,
             imageUrls: snap.imageUrls ?? [],
-            ...(snap.error ? { error: viewerFailureText(snap) } : {}),
+            // 🔴 LOG IT. The SDK's rule is "log it, show it in a developer
+            // surface, never render it verbatim" — and after the render fix
+            // this text was reaching NEITHER. The throwing paths log; the
+            // resolved path (the common one) did not, so for most failures
+            // nobody — user or developer — could find out what happened.
+            ...(snap.error
+              ? { error: logAndMapFailure(snap, 'poll', { workflowId }) }
+              : {}),
           });
           if (JOB_TERMINAL.has(snap.status as QueueJobStatus)) {
             cleanup();
@@ -855,7 +862,9 @@ export function App() {
         status: snap.status as QueueJobStatus,
         cost: snap.cost?.total ?? estimatedCost,
         imageUrls: snap.imageUrls ?? [],
-        ...(snap.error ? { error: viewerFailureText(snap) } : {}),
+        ...(snap.error
+          ? { error: logAndMapFailure(snap, 'submit', { workflowId: snap.workflowId }) }
+          : {}),
       });
       // submit() does NOT auto-poll (SDK gotcha #10) — start this job's
       // own poll loop unless it already came back terminal (cached hit).
@@ -1123,9 +1132,13 @@ export function App() {
                   earlier "we no longer render the SDK string" claim was not
                   true of the app — the catches were fixed and this was not.
                   The budget sniff still READS both; it just never shows them. */}
-              {isInsufficient
-                ? 'Not enough Buzz for this generation.'
-                : 'Generation failed.'}
+              {/* No `isInsufficient` ternary here: this block's own render
+                  guard above already excludes that case (it routes to the
+                  top-up CTA instead), so the true arm was unreachable —
+                  measured, replacing it with a sentinel string left the suite
+                  fully green. A branch that cannot execute reads as handling a
+                  case it structurally cannot reach. */}
+              Generation failed.
             </p>
           </div>
         )}
@@ -2333,31 +2346,6 @@ function StyleSheet() {
  * Only the boot state uses this. Once `ready` is true the host's real theme
  * wins, whatever the OS says.
  */
-/**
- * Viewer-facing text for a RESOLVED failure snapshot.
- *
- * 🔴 `snapshot.error` is SERVER-AUTHORED AND UNSANITISED — the SDK documents it
- * as carrying raw Prisma/pg column and constraint names — so it must never be
- * rendered, even though this is the path most failures take. A budget refusal,
- * a velocity limit, a daily cap and a fail-closed deny all RESOLVE with a
- * `status:'failed'` snapshot rather than throwing, so fixing only the throwing
- * catches left the common case still leaking.
- *
- * The server's words are still READ — the budget sniff keys off
- * `result.error` — they are just never shown. Where the text is genuinely
- * actionable we surface it as our own sentence instead.
- */
-function viewerFailureText(snap: { error?: string | null }): string {
-  const reason = (snap.error ?? '').toLowerCase();
-  if (/insufficient|not enough|budget|balance/.test(reason)) {
-    return 'Not enough Buzz for this generation.';
-  }
-  if (/rate|too many|velocity|limit/.test(reason)) {
-    return 'Too many generations right now — try again shortly.';
-  }
-  return 'This generation failed.';
-}
-
 function bootThemeGuess(): 'dark' | 'light' {
   try {
     // 1. WHAT THE BOOT SCRIPT ALREADY PAINTED WITH. index.html resolves the
@@ -2393,6 +2381,69 @@ function bootThemeGuess(): 'dark' | 'light' {
     // falls back to its unmedia'd light rule in the same situation.
     return 'light';
   }
+}
+
+/**
+ * Viewer-facing text for a RESOLVED failure snapshot.
+ *
+ * 🔴 `snapshot.error` is SERVER-AUTHORED AND UNSANITISED — the SDK documents it
+ * as carrying raw Prisma/pg column and constraint names — so it must never be
+ * rendered, even though this is the path most failures take. Callers log it.
+ *
+ * 🔴 AND IT MUST NOT BE CLASSIFIED BY SUBSTRING EITHER. The first version of
+ * this matched /rate|too many|velocity|limit/ against that text, which is wrong
+ * on the most common words in this domain: `rate` is inside `geneRATEd` and
+ * `modeRATEd`. Measured — "NSFW prompt was moderated" and "Failed to generate
+ * image: checkpoint not found" both rendered as "Too many generations right
+ * now", and "not enough VRAM" rendered as a Buzz shortfall. Telling a user to
+ * wait when they need to change their prompt, or to buy Buzz when the worker is
+ * out of VRAM, is worse than saying nothing specific.
+ *
+ * So the ONLY specific case is the one with a STRUCTURAL signal. The SDK
+ * documents the budget/spend-cap refusal as the resolved-`failed` reply that
+ * still carries a price ("the server quotes the price it refused to charge"),
+ * and uses `status === 'failed' && typeof cost?.total !== 'number'` as its own
+ * discriminator. That is a fact about the shape, not about wording.
+ *
+ * `phase` scopes it honestly: the price-present rule is documented for the
+ * SUBMIT reply. A job that has already started and later fails is not a budget
+ * refusal, so the poll path never takes the Buzz arm however it is priced.
+ * Everything else gets one neutral sentence — free text is all that is left,
+ * and guessing at it is what this comment exists to prevent.
+ */
+/**
+ * Map a resolved failure to viewer copy AND put the server's own words on the
+ * developer channel. Kept as one call so the two can never drift apart — the
+ * bug being closed here is exactly that the mapping shipped without the log.
+ */
+function logAndMapFailure(
+  snap: { status?: string; error?: string | null; cost?: { total?: number | null } | null },
+  phase: 'submit' | 'poll',
+  ctx: Record<string, unknown>
+): string {
+  // eslint-disable-next-line no-console
+  console.warn('[gfm] workflow failed', {
+    ...ctx,
+    phase,
+    status: snap.status,
+    // Developer channel only. Never rendered — see viewerFailureText.
+    serverReason: snap.error,
+  });
+  return viewerFailureText(snap, phase);
+}
+
+function viewerFailureText(
+  snap: { status?: string; cost?: { total?: number | null } | null },
+  phase: 'submit' | 'poll'
+): string {
+  if (
+    phase === 'submit' &&
+    snap.status === 'failed' &&
+    typeof snap.cost?.total === 'number'
+  ) {
+    return 'Not enough Buzz for this generation.';
+  }
+  return 'This generation failed.';
 }
 
 /**

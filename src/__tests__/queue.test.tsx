@@ -258,9 +258,153 @@ describe('Generation queue (task 3)', () => {
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
-      expect(screen.getByText('Not enough Buzz for this generation.')).toBeInTheDocument();
+      // Our words, not the server's. And NOT a Buzz claim: this snapshot carries
+      // no price, so it is not the documented budget refusal — an earlier
+      // version of this test asserted "Not enough Buzz" purely because the text
+      // contained "insufficient", which is the substring guessing that got
+      // removed.
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
     });
     expect(screen.queryByText(/account 12345/)).toBeNull();
+    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+  });
+
+  it('does NOT guess at the server\'s wording — "generate"/"moderated" are not rate limits', async () => {
+    // 🔴 THE REGRESSION THIS EXISTS FOR. A substring classifier matched
+    // /rate|too many|velocity|limit/ against server text, and `rate` sits inside
+    // "geneRATEd" and "modeRATEd" — the most common words in this domain. A
+    // moderation rejection rendered as "Too many generations right now", which
+    // tells the user to wait when they need to change their prompt.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({
+      workflowId: 'wf_mod',
+      status: 'failed',
+      error: 'NSFW prompt was moderated; image could not be generated',
+    } as never);
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Too many generations/)).toBeNull();
+    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+    expect(screen.queryByText(/moderated/)).toBeNull();
+  });
+
+  it('does not call an infrastructure failure a Buzz shortfall', async () => {
+    // "not enough VRAM" contains "not enough". Only a PRICED refusal is a Buzz
+    // problem, and that is a fact about the snapshot's shape, not its prose.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({
+      workflowId: 'wf_vram',
+      status: 'failed',
+      error: 'not enough VRAM available on the worker',
+    } as never);
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+  });
+
+  it('a PRICED refusal on submit IS reported as a Buzz shortfall', async () => {
+    // The one structural case: the SDK documents the budget refusal as the
+    // resolved-failed reply that still carries the price it refused to charge.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({
+      workflowId: 'wf_budget',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: 42 },
+    } as never);
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByText('Not enough Buzz for this generation.')).toBeInTheDocument();
+    });
+  });
+
+  it('the POLL site maps too — an async failure never leaks the server text', async () => {
+    // The submit-site test reached only one of the two write sites; the poll
+    // site is the one an asynchronously-failing job actually takes, and
+    // reverting it to raw `snap.error` survived the whole suite.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({ workflowId: 'wf_async', status: 'pending' } as never);
+    spies.poll.mockResolvedValue({
+      workflowId: 'wf_async',
+      status: 'failed',
+      error: 'Unique constraint failed on the fields: (`accountBalance`)',
+    } as never);
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/accountBalance/)).toBeNull();
+    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+  });
+
+  it('a PRICED poll failure is still NOT a Buzz shortfall (phase scoping)', async () => {
+    // The price-carries-the-refusal rule is documented for the SUBMIT reply. A
+    // job that already started and later failed is not a budget refusal however
+    // it is priced — without the `phase === 'submit'` term this renders a Buzz
+    // shortfall for, say, a worker crash on a priced job.
+    const spies = getMockSpies();
+    spies.submit.mockResolvedValue({ workflowId: 'wf_p', status: 'pending' } as never);
+    spies.poll.mockResolvedValue({
+      workflowId: 'wf_p',
+      status: 'failed',
+      error: 'worker crashed mid-render',
+      cost: { total: 42 },
+    } as never);
+    await renderApp(<App />);
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
+    });
+    expect(screen.queryByText(/Not enough Buzz/)).toBeNull();
+  });
+
+  it("logs the server's reason even though it never renders it", async () => {
+    // 🔴 The SDK's rule is "log it, show it in a developer surface, never render
+    // it verbatim". After the render fix this text was reaching NEITHER — the
+    // resolved path is the common one and had no log at all, so for most
+    // failures nobody could find out what happened.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const spies = getMockSpies();
+      spies.submit.mockResolvedValue({
+        workflowId: 'wf_log',
+        status: 'failed',
+        error: 'orchestrator exploded in a very specific way',
+      } as never);
+      await renderApp(<App />);
+      await userEvent.click(
+        screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+      );
+      await waitFor(() => {
+        expect(screen.getByText('This generation failed.')).toBeInTheDocument();
+      });
+      const logged = warn.mock.calls.some((args) =>
+        JSON.stringify(args).includes('orchestrator exploded in a very specific way')
+      );
+      expect(logged).toBe(true);
+      // ...and still not on screen.
+      expect(screen.queryByText(/orchestrator exploded/)).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('a THROWN workflow-failed submit says something different from a plain exception', async () => {

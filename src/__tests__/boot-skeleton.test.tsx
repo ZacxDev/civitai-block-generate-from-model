@@ -457,7 +457,37 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     // and completely inert in every real viewport — and the presence check
     // above passes. So: the attribute rules must sit at the TOP LEVEL of the
     // stylesheet, outside any `@media` block.
-    const topLevel = css.replace(/@media[^{]*\{(?:[^{}]*\{[^{}]*\})*[^{}]*\}/g, '');
+    // Brace-DEPTH scan, not a regex. `@media…{ (?:[^{}]*\{[^{}]*\})* … }` only
+    // handles two levels and no braces inside strings, so a nested at-rule
+    // (`@supports`) or a declaration containing `{` terminates the strip early
+    // and leaves inert rules in `topLevel` — the guard would then pass while
+    // claiming otherwise. Both realistic mutants died either way, but the
+    // sentence above promised more than the regex delivered.
+    const stripAtRules = (input: string): string => {
+      let out = '';
+      let i = 0;
+      while (i < input.length) {
+        if (input.startsWith('@media', i)) {
+          const open = input.indexOf('{', i);
+          if (open === -1) break;
+          let depth = 0;
+          let j = open;
+          for (; j < input.length; j++) {
+            if (input[j] === '{') depth += 1;
+            else if (input[j] === '}') {
+              depth -= 1;
+              if (depth === 0) break;
+            }
+          }
+          i = j + 1;
+          continue;
+        }
+        out += input[i];
+        i += 1;
+      }
+      return out;
+    };
+    const topLevel = stripAtRules(css);
     for (const theme of ['dark', 'light'] as const) {
       expect(
         new RegExp(`\\[data-civitai-boot-theme='${theme}'\\]`).test(topLevel)
