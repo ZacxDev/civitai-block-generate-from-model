@@ -24,6 +24,7 @@ import {
   getMockSpies,
   renderApp,
   resetBlocksReactMock,
+  setMockBuzzBalance,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -312,10 +313,17 @@ describe('Generation queue (task 3)', () => {
     expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
   });
 
-  it('a PRICED refusal on submit IS reported as a spend limit', async () => {
-    // The one structural case: the SDK documents the budget refusal as the
-    // resolved-failed reply that still carries the price it refused to charge.
+  it('a PRICED refusal on submit the viewer CANNOT afford says so in BOTH places, exactly twice', async () => {
+    // 🔴 EXACTLY TWO, not "> 0". The claim this test makes is that the CTA copy
+    // and the job card AGREE, and `toBeGreaterThan(0)` cannot tell 2 from 1 —
+    // it passes just as happily when one of the two consumers has stopped
+    // saying it, which is the exact disagreement the one predicate exists to
+    // prevent. Measured: with `> 0`, re-scoping `viewerFailureText` to the
+    // submit phase (so the card and the CTA use different rules) left the whole
+    // suite green.
     const spies = getMockSpies();
+    // Broke: 5 < 42, and 42 is under DEFAULT_TOKEN.buzzBudget (50).
+    setMockBuzzBalance({ balance: { blue: 5, green: 0, yellow: 0 } });
     spies.submit.mockResolvedValue({
       workflowId: 'wf_budget',
       status: 'failed',
@@ -323,17 +331,23 @@ describe('Generation queue (task 3)', () => {
       cost: { total: 42 },
     } as never);
     await renderApp(<App />);
+    // Freeze the post-submit re-quote. A SUCCESSFUL re-estimate publishes its
+    // own snapshot over the hook's shared `result` and deliberately clears this
+    // CTA (pinned by error-cta's "does not LATCH"), so leaving it live makes the
+    // window under assertion a race rather than a state.
+    spies.estimate.mockImplementation(() => new Promise(() => {}));
     await userEvent.click(
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
-      // getAllByText: the CTA copy AND the job card both say it now — that
-      // agreement is the point of the single predicate, so a single-match
-      // query would fail precisely BECAUSE the fix works.
       expect(
-        screen.getAllByText('This generation hit a Buzz spend limit.').length
-      ).toBeGreaterThan(0);
+        screen.getAllByText('This generation hit a Buzz spend limit.')
+      ).toHaveLength(2);
     });
+    // ...and the money surface is the whole surface: Generate is gone.
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
   });
 
   it('the POLL site maps too — an async failure never leaks the server text', async () => {
@@ -358,32 +372,121 @@ describe('Generation queue (task 3)', () => {
     expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
   });
 
-  it('a PRICED poll failure reads the SAME as a priced submit refusal (one rule)', async () => {
-    // 🔴 ONE RULE. Phase-scoping the card while the CTA (computed from the
-    // hook's shared `result`, which has no phase) stayed phase-blind meant the
-    // two could disagree on the same screen — card saying "failed", CTA
-    // offering to sell Buzz. The known cost is that a priced job failing
-    // mid-render also reads as a spend limit; that is named in the predicate's
-    // doc and needs a structured code the snapshot does not carry.
+  it('🔴 a job that was CHARGED and then failed mid-render is NOT a spend limit', async () => {
+    // 🔴 THE ROUND-4 DEFECT, pinned behaviourally. `poll()` publishes every
+    // resolved reply onto the hook's shared `result`, so an ordinary job that
+    // was queued, charged, and then died mid-render arrives as
+    // `{status:'failed', cost:{total:42}}` — the same shape as a budget
+    // refusal. Under "priced + failed" alone that rendered a "Top up · N"
+    // button, REMOVED Generate, SUPPRESSED the real error card, and told the
+    // user they had hit a Buzz spend limit. They had not: they had paid.
+    //
+    // The discriminator is the balance. 500 covers 42, so whatever went wrong,
+    // money was not it.
     const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 500, green: 0, yellow: 0 } });
     spies.submit.mockResolvedValue({ workflowId: 'wf_p', status: 'pending' } as never);
     spies.poll.mockResolvedValue({
       workflowId: 'wf_p',
       status: 'failed',
-      error: 'worker crashed mid-render',
+      error: 'NSFW output was moderated after render',
       cost: { total: 42 },
     } as never);
     await renderApp(<App />);
+    spies.estimate.mockImplementation(() => new Promise(() => {}));
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    // The user-visible outcome, all four parts of it.
+    await waitFor(() => {
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
+    });
+    // 1. Generate is still there — nothing about this failure is fixed by money.
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    // 2. No purchase CTA, and 3. no spend-limit sentence anywhere.
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
+    // 4. The real error surface is NOT suppressed — that suppression
+    //    (`&& !spendLimited`) is what hid the actual failure from the user.
+    expect(screen.getByText('Generation failed.')).toBeInTheDocument();
+    // ...and the server's unsanitised words still never reach the screen.
+    expect(screen.queryByText(/moderated/)).toBeNull();
+    expect(getMockSpies().openPurchaseModal).not.toHaveBeenCalled();
+  });
+
+  it('a priced refusal with NO server text still fills the job card (submit site)', async () => {
+    // 🔴 Both card write sites used to be gated on `snap.error` being truthy.
+    // The server is not obliged to send one — `snapshotFromWorkflow` omits the
+    // key whenever there is nothing to say — so a priced `failed` reply with no
+    // text produced the money CTA above and a card that said nothing about why.
+    // The one predicate's two consumers, visibly disagreeing.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 0 } });
+    spies.submit.mockResolvedValue({
+      workflowId: 'wf_silent',
+      status: 'failed',
+      cost: { total: 42 },
+    } as never);
+    await renderApp(<App />);
+    spies.estimate.mockImplementation(() => new Promise(() => {}));
     await userEvent.click(
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
-      // getAllByText: the CTA copy AND the job card both say it now — that
-      // agreement is the point of the single predicate, so a single-match
-      // query would fail precisely BECAUSE the fix works.
       expect(
-        screen.getAllByText('This generation hit a Buzz spend limit.').length
-      ).toBeGreaterThan(0);
+        screen.getAllByText('This generation hit a Buzz spend limit.')
+      ).toHaveLength(2);
+    });
+  });
+
+  it('a priced refusal with NO server text still fills the job card (poll site)', async () => {
+    // Same gap at the other write site — the one an asynchronously-failing job
+    // actually takes.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 0 } });
+    spies.submit.mockResolvedValue({ workflowId: 'wf_sil2', status: 'pending' } as never);
+    spies.poll.mockResolvedValue({
+      workflowId: 'wf_sil2',
+      status: 'failed',
+      cost: { total: 42 },
+    } as never);
+    await renderApp(<App />);
+    spies.estimate.mockImplementation(() => new Promise(() => {}));
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(
+        screen.getAllByText('This generation hit a Buzz spend limit.')
+      ).toHaveLength(2);
+    });
+  });
+
+  it('the SAME priced poll failure IS a spend limit when the viewer cannot cover it', async () => {
+    // The positive control for the case above: identical snapshot, identical
+    // token, only the balance moved. Without this pair the block could be
+    // refusing to offer a top-up for every priced failure and the assertions
+    // above would all still pass.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 1, green: 1, yellow: 1 } }); // 3 < 42
+    spies.submit.mockResolvedValue({ workflowId: 'wf_p2', status: 'pending' } as never);
+    spies.poll.mockResolvedValue({
+      workflowId: 'wf_p2',
+      status: 'failed',
+      error: 'NSFW output was moderated after render',
+      cost: { total: 42 },
+    } as never);
+    await renderApp(<App />);
+    spies.estimate.mockImplementation(() => new Promise(() => {}));
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() => {
+      expect(
+        screen.getAllByText('This generation hit a Buzz spend limit.')
+      ).toHaveLength(2);
     });
   });
 
@@ -400,6 +503,7 @@ describe('Generation queue (task 3)', () => {
     // only `result` can produce, so reverting the mock to a static value fails
     // here rather than silently un-testing six other cases.
     const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 0 } });
     spies.submit.mockResolvedValue({
       workflowId: 'wf_seam',
       status: 'failed',
@@ -407,12 +511,38 @@ describe('Generation queue (task 3)', () => {
       cost: { total: 9 },
     } as never);
     await renderApp(<App />);
+    spies.estimate.mockImplementation(() => new Promise(() => {}));
     await userEvent.click(
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
     });
+  });
+
+  it('a terminal workflow REFETCHES the balance — a stale figure misjudges the next refusal', async () => {
+    // 🔴 The predicate compares the viewer's balance against the NEXT refusal's
+    // price. The generation that just settled is precisely the thing that moved
+    // that balance, so without a re-read the next classification is made against
+    // a wallet that no longer exists.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 500, green: 0, yellow: 0 } });
+    spies.submit.mockResolvedValue({ workflowId: 'wf_rf', status: 'pending' } as never);
+    spies.poll.mockResolvedValue({
+      workflowId: 'wf_rf',
+      status: 'succeeded',
+      imageUrls: ['https://example.test/ok.jpg'],
+      cost: { total: 12 },
+    } as never);
+    await renderApp(<App />);
+    spies.refetchBuzzBalance.mockClear();
+    await userEvent.click(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    );
+    await waitFor(() =>
+      expect(screen.getAllByRole('button', { name: 'Download' })).toHaveLength(1)
+    );
+    expect(spies.refetchBuzzBalance).toHaveBeenCalled();
   });
 
   it("logs the server's reason even though it never renders it", async () => {

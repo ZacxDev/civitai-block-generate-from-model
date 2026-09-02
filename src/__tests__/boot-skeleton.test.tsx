@@ -443,7 +443,20 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     // `[data-civitai-boot-theme=...]` rule left the whole suite green while a
     // dark host on a light OS would paint white and then repaint — the exact
     // defect this feature removes, shipped silently.
-    const css = /<style>([\s\S]*?)<\/style>/.exec(INDEX_HTML)?.[1] ?? '';
+    const rawCss = /<style>([\s\S]*?)<\/style>/.exec(INDEX_HTML)?.[1] ?? '';
+    // 🔴 STRIP COMMENTS FIRST — both checks below are otherwise satisfiable by
+    // PROSE. Measured: this stylesheet's own comment explains why the
+    // `[data-civitai-boot-theme='light']` rule is not redundant, and quotes the
+    // selector to do it. With the four real rules moved inside a media query,
+    // the "is it top-level?" assertion for `light` still passed — on the
+    // comment. Worse, the apostrophe in "the host's answer" reads as an opening
+    // string delimiter to the scanner below and desynchronises every quote
+    // after it, which is how a correct string-aware scan still let the mutant
+    // through. A guard that a sentence can satisfy is not a guard.
+    const stripComments = (input: string): string =>
+      input.replace(/\/\*[\s\S]*?\*\//g, ' ');
+    const css = stripComments(rawCss);
+    expect(css).not.toMatch(/\/\*/); // the strip actually ran
     const ruleFor = (theme: 'dark' | 'light', sel: string) =>
       new RegExp(
         `\\[data-civitai-boot-theme='${theme}'\\]\\s+\\${sel}\\s*\\{[^}]*background[^}]*\\}`
@@ -457,36 +470,118 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     // and completely inert in every real viewport — and the presence check
     // above passes. So: the attribute rules must sit at the TOP LEVEL of the
     // stylesheet, outside any `@media` block.
-    // Brace-DEPTH scan, not a regex. `@media…{ (?:[^{}]*\{[^{}]*\})* … }` only
-    // handles two levels and no braces inside strings, so a nested at-rule
-    // (`@supports`) or a declaration containing `{` terminates the strip early
-    // and leaves inert rules in `topLevel` — the guard would then pass while
-    // claiming otherwise. Both realistic mutants died either way, but the
-    // sentence above promised more than the regex delivered.
+    // Brace-DEPTH scan, not a regex — AND STRING-AWARE, which is the part the
+    // previous version's comment claimed and its body did not do.
+    //
+    // 🔴 MEASURED, because "handles no braces inside strings" was a sentence
+    // with nothing behind it. Move all four `[data-civitai-boot-theme=…]` rules
+    // inside `@media (prefers-color-scheme: dark)` and this test goes red —
+    // correct. Do the SAME nesting and add `content: "}"` anywhere in that
+    // block, and it went 164/164 GREEN: the unquoted `}` inside the string
+    // closed the at-rule early, so the rest of the block — the now-inert
+    // attribute rules — survived into `topLevel` and the guard passed while the
+    // host-theme paint was completely dead for a light-OS viewer on a dark host.
+    // A scan that can be walked past by a declaration value is not a guard.
+    //
+    // It also strips ANY at-rule, not just `@media`. `@supports`,
+    // `@layer`, `@container` nest exactly as inertly, and a scanner that knows
+    // only one keyword copies the others' bodies into `topLevel` verbatim.
+    // Statement at-rules (`@charset "…";`, `@import …;`) end at the `;` and have
+    // no block to skip.
     const stripAtRules = (input: string): string => {
+      // `charAt` rather than `[n]` so an out-of-range read is '' rather than
+      // `undefined` — the scan compares characters, and `undefined` would make
+      // every comparison quietly false at the tail.
+      const at = (n: number) => input.charAt(n);
       let out = '';
       let i = 0;
+      // The string delimiter we are currently inside, or ''. Copying is
+      // suspended for at-rule bodies but string tracking never is — a `{` or a
+      // `@` inside a quoted value is data, not structure.
+      let quote = '';
       while (i < input.length) {
-        if (input.startsWith('@media', i)) {
-          const open = input.indexOf('{', i);
-          if (open === -1) break;
-          let depth = 0;
-          let j = open;
+        const c = at(i);
+        if (quote) {
+          out += c;
+          if (c === '\\') {
+            out += at(i + 1); // an escaped delimiter does not close the string
+            i += 2;
+            continue;
+          }
+          if (c === quote) quote = '';
+          i += 1;
+          continue;
+        }
+        if (c === '"' || c === "'") {
+          quote = c;
+          out += c;
+          i += 1;
+          continue;
+        }
+        if (c === '@') {
+          // Find this at-rule's terminator, ignoring `{`/`;` inside strings.
+          let j = i + 1;
+          let open = -1;
+          let q = '';
           for (; j < input.length; j++) {
-            if (input[j] === '{') depth += 1;
-            else if (input[j] === '}') {
+            const d = at(j);
+            if (q) {
+              if (d === '\\') j += 1;
+              else if (d === q) q = '';
+              continue;
+            }
+            if (d === '"' || d === "'") q = d;
+            else if (d === ';') break; // statement at-rule — no block to skip
+            else if (d === '{') {
+              open = j;
+              break;
+            }
+          }
+          if (open === -1) {
+            // `@charset "…";` / `@import …;` (or a truncated tail).
+            i = j + 1;
+            continue;
+          }
+          let depth = 0;
+          let k = open;
+          q = '';
+          for (; k < input.length; k++) {
+            const d = at(k);
+            if (q) {
+              if (d === '\\') k += 1;
+              else if (d === q) q = '';
+              continue;
+            }
+            if (d === '"' || d === "'") q = d;
+            else if (d === '{') depth += 1;
+            else if (d === '}') {
               depth -= 1;
               if (depth === 0) break;
             }
           }
-          i = j + 1;
+          i = k + 1;
           continue;
         }
-        out += input[i];
+        out += c;
         i += 1;
       }
       return out;
     };
+    // 🔴 POSITIVE + NEGATIVE CONTROL on the scanner itself, inline, because a
+    // strip that returns its input unchanged would satisfy every assertion
+    // below without reading a single at-rule.
+    expect(stripAtRules('a{x:1}@media s{b{y:2}}c{z:3}')).toBe('a{x:1}c{z:3}');
+    // The mutant that used to walk straight through: a `}` inside a quoted
+    // declaration value must NOT terminate the at-rule early.
+    expect(stripAtRules('@media s{p{content:"}"}q{y:2}}kept{z:3}')).toBe('kept{z:3}');
+    // Any at-rule, not just @media — and a statement at-rule has no block.
+    expect(stripAtRules('@supports (a:b){x{y:1}}@charset "u";kept{z:3}')).toBe('kept{z:3}');
+    // And the comment pre-pass: an apostrophe in prose must not leak into the
+    // scanner's string state, and a selector NAMED in a comment must not count.
+    expect(stripAtRules(stripComments("/* host's */@media s{a{b:1}}kept{z:3}")))
+      .toContain('kept{z:3}');
+    expect(stripComments("/* [data-civitai-boot-theme='light'] */x{y:1}"))
+      .not.toContain('data-civitai-boot-theme');
     const topLevel = stripAtRules(css);
     for (const theme of ['dark', 'light'] as const) {
       expect(

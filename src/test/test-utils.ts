@@ -117,6 +117,18 @@ type WorkflowState = {
   error: Error | null;
 };
 
+/**
+ * What `useBuzzBalance()` reports. `balance: null` is the SDK's "we do not know"
+ * — never fetched, anon viewer, or a host error — and the App's spend predicate
+ * must fail toward NOT-a-shortfall on it, so it is the DEFAULT here: a test that
+ * wants the money CTA has to opt in with `setMockBuzzBalance`.
+ */
+type BalanceState = {
+  balance: { blue: number; green: number; yellow: number } | null;
+  loading: boolean;
+  error: Error | null;
+};
+
 interface MockState {
   context: ModelSlotContext;
   viewer: ViewerInfo | null;
@@ -124,6 +136,7 @@ interface MockState {
   theme: 'light' | 'dark';
   ready: boolean;
   workflow: WorkflowState;
+  buzzBalance: BalanceState;
   // Spy hooks exposed so tests can assert calls.
   spies: {
     submit: ReturnType<typeof vi.fn>;
@@ -134,6 +147,7 @@ interface MockState {
     checkpointOpen: ReturnType<typeof vi.fn>;
     checkpointPersist: ReturnType<typeof vi.fn>;
     track: ReturnType<typeof vi.fn>;
+    refetchBuzzBalance: ReturnType<typeof vi.fn>;
   };
 }
 
@@ -149,6 +163,7 @@ function makeFreshState(): MockState {
       result: null,
       error: null,
     },
+    buzzBalance: { balance: null, loading: false, error: null },
     spies: {
       submit: vi.fn(),
       estimate: vi.fn(),
@@ -158,6 +173,7 @@ function makeFreshState(): MockState {
       checkpointOpen: vi.fn(),
       checkpointPersist: vi.fn(),
       track: vi.fn(),
+      refetchBuzzBalance: vi.fn(),
     },
   };
 }
@@ -201,6 +217,18 @@ export function setMockReady(ready: boolean): void {
 
 export function setMockWorkflow(patch: Partial<WorkflowState>): void {
   state.workflow = { ...state.workflow, ...patch };
+}
+
+/**
+ * Shape what `useBuzzBalance()` reports. Defaults to `{ balance: null }` — the
+ * SDK's "unknown" — because that is the case the App must fail SAFE on.
+ *
+ * `setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 0 } })` is a
+ * viewer who genuinely cannot afford anything; a large balance is a viewer for
+ * whom no priced refusal can be an affordability problem.
+ */
+export function setMockBuzzBalance(patch: Partial<BalanceState>): void {
+  state.buzzBalance = { ...state.buzzBalance, ...patch };
 }
 
 export function getMockSpies(): MockState['spies'] {
@@ -281,14 +309,42 @@ function useBuzzWorkflow() {
       state.workflow.result = snap ?? null;
       return snap;
     });
+  // 🔴 `estimate` PUBLISHES TOO, AND IT PUBLISHES BEFORE IT REJECTS. The real
+  // hook calls `setResult(snapshot)` on the host's reply and only THEN throws
+  // `WorkflowEstimateError` for an unusable one — so a refused estimate leaves a
+  // failure snapshot on the shared `result` that the money CTA reads, on FIRST
+  // PAINT, before the viewer has clicked anything. Wrapping only `submit`/`poll`
+  // left that join untested, which is exactly the gap it hid: no test could
+  // reach the CTA through the estimate path at all.
+  const publishEstimate = (fn: ReturnType<typeof vi.fn>) =>
+    vi.fn(async (...args: unknown[]) => {
+      try {
+        const snap = await (fn as (...a: unknown[]) => Promise<BlockWorkflowSnapshot>)(...args);
+        state.workflow.result = snap ?? null;
+        return snap;
+      } catch (err) {
+        const snap = (err as { snapshot?: BlockWorkflowSnapshot } | null)?.snapshot;
+        if (snap) state.workflow.result = snap;
+        throw err;
+      }
+    });
   return {
-    estimate: state.spies.estimate,
+    estimate: publishEstimate(state.spies.estimate),
     submit: publish(state.spies.submit),
     poll: publish(state.spies.poll),
     cancel: state.spies.cancel,
     status: state.workflow.status,
     result: state.workflow.result,
     error: state.workflow.error,
+  };
+}
+
+function useBuzzBalance() {
+  return {
+    balance: state.buzzBalance.balance,
+    loading: state.buzzBalance.loading,
+    error: state.buzzBalance.error,
+    refetch: state.spies.refetchBuzzBalance as unknown as () => void,
   };
 }
 
@@ -396,6 +452,7 @@ export async function blocksReactMockFactory() {
     useBlockToken,
     useBlockResize,
     useBuzzWorkflow,
+    useBuzzBalance,
     useBuzzPurchase,
     useCheckpointPicker,
     useCivitaiNavigate,

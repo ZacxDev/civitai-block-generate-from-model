@@ -5,6 +5,7 @@ import {
   useBlockContext,
   useBlockResize,
   useBlockSettings,
+  useBuzzBalance,
   useBuzzPurchase,
   useBuzzWorkflow,
   useCheckpointPicker,
@@ -177,16 +178,45 @@ export function postRequestSignIn(payload?: { returnUrl?: string }): void {
 }
 
 export function App() {
-  const { ready, context, viewer, theme, blockInstanceId } = useBlockContext();
+  const { ready, context, viewer, theme, blockInstanceId, token } = useBlockContext();
   const settings = useBlockSettings();
   const { submit, estimate, poll, cancel, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
+  // 🔴 Unconditional, component-level, ONE call. What the viewer can actually
+  // spend is the only structural signal that separates a refusal a top-up can
+  // fix from one it cannot — see `isSpendLimitRefusal`.
+  const {
+    balance: buzzBalance,
+    loading: buzzBalanceLoading,
+    error: buzzBalanceError,
+    refetch: refetchBuzzBalance,
+  } = useBuzzBalance();
   const checkpointPicker = useCheckpointPicker();
   // Latest poll fn in a ref so the per-job poll loops (started inside
   // handleGenerate, which closes over the submit-time `poll`) always call
   // the current hook instance without re-subscribing.
   const pollRef = useRef(poll);
   pollRef.current = poll;
+
+  // The balance we are willing to REASON about: only a settled, error-free
+  // read. A fetch in flight is reasoning about a figure that is being replaced,
+  // and a failed fetch leaves whatever the last success returned — both are
+  // "unknown", and unknown must fail toward NOT-a-shortfall (see the predicate).
+  const knownBuzzBalance = buzzBalanceLoading || buzzBalanceError ? null : buzzBalance;
+  const spend: SpendContext = {
+    balance: knownBuzzBalance,
+    // The per-call ceiling the HOST enforces (`cost_estimate <= token.buzzBudget`).
+    // Absent when the token carries no budget claim, in which case there is no
+    // ceiling clause to apply.
+    budgetCap: token?.buzzBudget ?? null,
+  };
+  // Refs so the per-job closures (poll loops, the submit handler) read the
+  // CURRENT balance/refetch rather than whatever was live when they were made —
+  // a job outlives several balance reads.
+  const spendRef = useRef(spend);
+  spendRef.current = spend;
+  const refetchBalanceRef = useRef(refetchBuzzBalance);
+  refetchBalanceRef.current = refetchBuzzBalance;
   // Tier-4 Delta A: rootRef is the outer (unpadded) measurement element
   // for useBlockResize. The SDK hook reads `ResizeObserverEntry.contentRect.height`
   // which is the CONTENT-box of the observed element — so any padding on
@@ -352,11 +382,23 @@ export function App() {
             // this text was reaching NEITHER. The throwing paths log; the
             // resolved path (the common one) did not, so for most failures
             // nobody — user or developer — could find out what happened.
-            ...(snap.error
-              ? { error: logAndMapFailure(snap, 'poll', { workflowId }) }
+            //
+            // 🔴 `status === 'failed'` is part of the condition, not just
+            // `snap.error`. Gating on the server's text alone meant a priced
+            // `failed` reply that carried no `error` string produced the money
+            // CTA above and a SILENT job card — the two consumers of the one
+            // predicate visibly disagreeing, which is exactly what the
+            // predicate exists to prevent.
+            ...(snap.error || snap.status === 'failed'
+              ? { error: logAndMapFailure(snap, 'poll', spendRef.current, { workflowId }) }
               : {}),
           });
           if (JOB_TERMINAL.has(snap.status as QueueJobStatus)) {
+            // The workflow settled, so any debit has landed. Re-read the
+            // balance now: the ONE PREDICATE compares it against the next
+            // refusal's price, and a stale figure would classify that one
+            // against a wallet that no longer exists.
+            refetchBalanceRef.current();
             cleanup();
             return;
           }
@@ -862,14 +904,23 @@ export function App() {
         status: snap.status as QueueJobStatus,
         cost: snap.cost?.total ?? estimatedCost,
         imageUrls: snap.imageUrls ?? [],
-        ...(snap.error
-          ? { error: logAndMapFailure(snap, 'submit', { workflowId: snap.workflowId }) }
+        // Same widened condition as the poll site — see the note there.
+        ...(snap.error || snap.status === 'failed'
+          ? {
+              error: logAndMapFailure(snap, 'submit', spendRef.current, {
+                workflowId: snap.workflowId,
+              }),
+            }
           : {}),
       });
       // submit() does NOT auto-poll (SDK gotcha #10) — start this job's
       // own poll loop unless it already came back terminal (cached hit).
       if (!JOB_TERMINAL.has(snap.status as QueueJobStatus) && snap.workflowId) {
         runJobPollLoop(localId, snap.workflowId);
+      } else {
+        // Terminal on the submit reply (cached hit, or a refusal): the balance
+        // may have moved and no poll loop will fire the refetch below.
+        refetchBalanceRef.current();
       }
       // Re-quote after the submit. The orchestrator prices dynamically — the
       // SAME params can cost differently between generations — so without
@@ -923,11 +974,13 @@ export function App() {
   // test asserting the opposite passed: the two rules lived at different sites,
   // so fixing one left the other deciding the money.
   //
-  // The structural signal, from the SDK: a spend-limit refusal is the resolved
-  // `status:'failed'` reply that still carries a PRICE — the server quotes what
-  // it refused to charge. blocks-react uses the same shape as its own
-  // discriminator. No prose, so no wording can fool it.
-  const spendLimited = isSpendLimitRefusal(result);
+  // 🔴 `result` IS THE HOOK'S SHARED SNAPSHOT — every resolved `poll` reply and
+  // the pre-rejection snapshot of a failed `estimate` land here, not just the
+  // submit reply. That is why "priced + failed" alone was wrong: a job that was
+  // charged and then failed mid-render, and an estimate refused before the user
+  // has clicked anything, both arrive on this exact value. The predicate's
+  // balance clause is what keeps them off the money CTA.
+  const spendLimited = isSpendLimitRefusal(result, spend);
 
   return (
     <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
@@ -1120,7 +1173,10 @@ export function App() {
                   Prisma/pg column and constraint names. This line is why the
                   earlier "we no longer render the SDK string" claim was not
                   true of the app — the catches were fixed and this was not.
-                  The budget sniff still READS both; it just never shows them. */}
+                  Nothing reads either string for CLASSIFICATION any more
+                  either: the one predicate is arithmetic over `cost.total`,
+                  the viewer's balance and the token's budget cap. The only
+                  consumer of `result.error` left is the developer console. */}
               {/* No spend-limit ternary here: this block's own render
                   guard above already excludes that case (it routes to the
                   top-up CTA instead), so the true arm was unreachable —
@@ -2373,61 +2429,90 @@ function bootThemeGuess(): 'dark' | 'light' {
 }
 
 /**
- * Viewer-facing text for a RESOLVED failure snapshot.
+ * Everything the ONE PREDICATE needs besides the snapshot: what the viewer can
+ * actually spend, and what the block's own token is allowed to spend per call.
  *
- * 🔴 `snapshot.error` is SERVER-AUTHORED AND UNSANITISED — the SDK documents it
- * as carrying raw Prisma/pg column and constraint names — so it must never be
- * rendered, even though this is the path most failures take. Callers log it.
- *
- * 🔴 AND IT MUST NOT BE CLASSIFIED BY SUBSTRING EITHER. The first version of
- * this matched /rate|too many|velocity|limit/ against that text, which is wrong
- * on the most common words in this domain: `rate` is inside `geneRATEd` and
- * `modeRATEd`. Measured — "NSFW prompt was moderated" and "Failed to generate
- * image: checkpoint not found" both rendered as "Too many generations right
- * now", and "not enough VRAM" rendered as a Buzz shortfall. Telling a user to
- * wait when they need to change their prompt, or to buy Buzz when the worker is
- * out of VRAM, is worse than saying nothing specific.
- *
- * So the ONLY specific case is the one with a STRUCTURAL signal. The SDK
- * documents the budget/spend-cap refusal as the resolved-`failed` reply that
- * still carries a price ("the server quotes the price it refused to charge"),
- * and uses `status === 'failed' && typeof cost?.total !== 'number'` as its own
- * discriminator. That is a fact about the shape, not about wording.
- *
- * `phase` scopes it honestly: the price-present rule is documented for the
- * SUBMIT reply. A job that has already started and later fails is not a budget
- * refusal, so the poll path never takes the Buzz arm however it is priced.
- * Everything else gets one neutral sentence — free text is all that is left,
- * and guessing at it is what this comment exists to prevent.
+ * `balance` is `null` for every kind of "we do not know" — never fetched yet,
+ * anon viewer, host error, or a refetch in flight over a now-stale figure. The
+ * predicate treats all of those the same way, and that is deliberate; see
+ * {@link isSpendLimitRefusal}.
  */
+type SpendContext = {
+  /** Spendable pools from `useBuzzBalance()`, or `null` when unknown. */
+  balance: { blue: number; green: number; yellow: number } | null;
+  /** `token.buzzBudget` — the per-call ceiling the HOST enforces, if claimed. */
+  budgetCap?: number | null;
+};
+
 /**
- * Is this resolved failure a SPEND-LIMIT refusal?
+ * Is this resolved failure a TRUE BALANCE SHORTFALL — the one refusal family a
+ * top-up can actually fix?
  *
- * 🔴 THE ONE PREDICATE. It decides the money CTA, the copy under it, and the
- * job card, so those three can never disagree again. Three earlier attempts
- * used prose — `insufficient|not enough|budget|balance`, then
- * `rate|too many|velocity|limit` — and each was wrong on ordinary words:
- * `rate` sits inside `geneRATEd` and `modeRATEd`, and `balance` inside the
- * Prisma constraint name `accountBalance`. A substring can always be spelled
- * by accident.
+ * 🔴 THE ONE PREDICATE. It decides the money CTA, the copy under it, and — via
+ * `viewerFailureText` — the job card, so no two of them can classify the SAME
+ * snapshot differently.
  *
- * The shape cannot. The SDK documents this family as the resolved
- * `status:'failed'` reply that still carries a PRICE — "the server quotes the
- * price it refused to charge" — and blocks-react uses the same test as its own
- * discriminator.
+ * 🔴 THE RESIDUAL, NAMED RATHER THAN HIDDEN, because the previous version of
+ * this sentence claimed they "can never disagree again" and that was false in
+ * two ways. One is fixed: both card write sites used to be gated on
+ * `snap.error` being truthy, so a priced `failed` with no server text produced
+ * the CTA copy and a silent card; they now fire on `status === 'failed'` too.
+ * The other is structural and remains — the CTA reads the hook's SHARED
+ * `result` (the latest reply from any job) while each card reads its OWN
+ * snapshot, so with several jobs in flight the CTA can be describing a
+ * different failure from the card next to it. Same rule, different inputs.
  *
- * 🔴 AND THE COPY MUST NOT SAY "not enough Buzz", because the family is wider
- * than a balance shortfall: the SDK enumerates the per-call budget gate, the
- * per-user daily cap, the per-app aggregate and velocity caps, and the
- * dev-tunnel session cap. Only the first is about the viewer's balance; a
- * per-app velocity cap is the APP's limit and no amount of topping up clears
- * it. The snapshot carries no code distinguishing them, so the honest sentence
- * names the spend limit and stops there.
+ * 🔴 NO PROSE. Three earlier attempts classified by substring —
+ * `insufficient|not enough|budget|balance`, then `rate|too many|velocity|limit`
+ * — and each was wrong on ordinary words: `rate` sits inside `geneRATEd` and
+ * `modeRATEd`, and `balance` inside the Prisma constraint name
+ * `accountBalance`. A substring can always be spelled by accident. Nothing
+ * below reads `snap.error`.
+ *
+ * 🔴 AND "PRICED + FAILED" IS NOT ENOUGH ON ITS OWN — that was round 4's bug.
+ * The SDK is explicit that the priced-refusal family is WIDER than
+ * affordability: "the per-app velocity limit, the per-app aggregate daily cap,
+ * a fail-closed 'temporarily unavailable' deny and a missing price quote are
+ * all priced, resolving outcomes too" (`useBuzzWorkflow` docstring). So is the
+ * per-call `token.buzzBudget` gate, whose refusal "comes back as a `failed`
+ * snapshot naming both numbers" (`WorkflowBodyCustomComfyRecipe.maxBuzz`). And
+ * so, in practice, is an ordinary job that was queued, CHARGED, and then failed
+ * mid-render — `poll()` publishes that snapshot with a numeric `cost.total`
+ * onto the hook's shared `result`, which is what the CTA reads. Offering to
+ * sell Buzz for any of those is selling a fix that cannot work.
+ *
+ * The discriminator is structural and it is arithmetic: a refusal is a
+ * shortfall only when the viewer's spendable balance does NOT cover the price
+ * the server quoted. If the balance already covers it, affordability is not
+ * what went wrong, whatever else did.
+ *
+ * Second structural clause, same logic one level up: the host gates
+ * `cost_estimate <= token.buzzBudget` before forwarding to the orchestrator, so
+ * a price ABOVE that ceiling was refused by the token's own budget claim. Buzz
+ * bought today does not raise a claim minted at block load, so that is not
+ * top-up-fixable either.
+ *
+ * 🔴 FAIL TOWARD NOT-A-SHORTFALL. With no known balance the answer is `false`,
+ * not `true`: the failure mode of a wrong `false` is an unhelpful error message,
+ * the failure mode of a wrong `true` is charging someone for a problem money
+ * cannot solve. Never treat "unknown" as "short".
  */
 function isSpendLimitRefusal(
-  snap: { status?: string; cost?: { total?: number | null } | null } | null | undefined
+  snap: { status?: string; cost?: { total?: number | null } | null } | null | undefined,
+  spend: SpendContext
 ): boolean {
-  return snap?.status === 'failed' && typeof snap.cost?.total === 'number';
+  if (snap?.status !== 'failed') return false;
+  const price = snap.cost?.total;
+  // Unpriced failures are not refusals at all — blocks-react rejects those
+  // rather than resolving them, and an unpriced snapshot names no sum to compare.
+  if (typeof price !== 'number') return false;
+  // Above the token's own per-call ceiling => the host's budget gate refused it,
+  // not the viewer's wallet. Topping up cannot raise a JWT claim.
+  if (typeof spend.budgetCap === 'number' && price > spend.budgetCap) return false;
+  // Unknown balance => not a shortfall. See the 🔴 above.
+  if (!spend.balance) return false;
+  const spendable = spend.balance.blue + spend.balance.green + spend.balance.yellow;
+  return spendable < price;
 }
 
 /**
@@ -2438,6 +2523,7 @@ function isSpendLimitRefusal(
 function logAndMapFailure(
   snap: { status?: string; error?: string | null; cost?: { total?: number | null } | null },
   phase: 'submit' | 'poll',
+  spend: SpendContext,
   ctx: Record<string, unknown>
 ): string {
   // eslint-disable-next-line no-console
@@ -2448,7 +2534,7 @@ function logAndMapFailure(
     // Developer channel only. Never rendered — see viewerFailureText.
     serverReason: snap.error,
   });
-  return viewerFailureText(snap, phase);
+  return viewerFailureText(snap, spend);
 }
 
 /**
@@ -2458,36 +2544,20 @@ function logAndMapFailure(
  * as carrying raw Prisma/pg column and constraint names — so it is logged by
  * the caller and never rendered.
  *
- * `phase` scopes the spend-limit arm: the price-carries-the-refusal rule is
- * documented for the SUBMIT reply. A job that already started and later failed
- * is not a spend refusal however it is priced. (On submit the test is in fact
- * a tautology — blocks-react THROWS a failed reply that carries no numeric
- * cost, so anything that resolves failed here is priced — but it is written
- * out because the tautology is a property of today's SDK, not of the contract.)
+ * It takes NO `phase`. A phase-scoped card next to a phase-blind CTA (the CTA
+ * is computed from the hook's shared `result`, which carries no phase) is how
+ * round 3 put "failed" and "buy Buzz" on the same screen. One rule.
  *
- * Everything else gets one neutral sentence: the resolved path carries no
- * structured code, and guessing at free text is what the three rounds above
- * were spent undoing.
+ * Everything that is not a balance shortfall gets one neutral sentence. The
+ * resolved snapshot carries no structured refusal code, and `snap.error` is the
+ * server's own unsanitised text, so there is nothing else honest to say —
+ * guessing at that free text is what three rounds were spent undoing.
  */
 function viewerFailureText(
   snap: { status?: string; cost?: { total?: number | null } | null },
-  phase: 'submit' | 'poll'
+  spend: SpendContext
 ): string {
-  // `phase` is retained for the log and for readability, but it deliberately
-  // does NOT gate the copy any more. It used to, and that recreated the very
-  // defect this predicate was extracted to remove: the CTA is computed from the
-  // hook's shared `result`, which carries no phase, so a phase-scoped CARD and
-  // a phase-blind CTA disagreed — one saying "failed", the other offering to
-  // sell Buzz. Two rules, one screen. One rule is worth more than the precision
-  // the second one was buying.
-  //
-  // 🔴 The residual imprecision, named rather than hidden: a job that was
-  // priced, started, and then failed mid-render also matches this shape, and
-  // will read as a spend limit. Distinguishing it needs a structured code the
-  // resolved snapshot does not carry. When the SDK grows one, this is the
-  // single place to key on it.
-  void phase;
-  if (isSpendLimitRefusal(snap)) {
+  if (isSpendLimitRefusal(snap, spend)) {
     return 'This generation hit a Buzz spend limit.';
   }
   return 'This generation failed.';
