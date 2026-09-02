@@ -229,8 +229,24 @@ export function App() {
   // It is accepted deliberately: it lands on the FAIL-TOWARD-NOT-A-SHORTFALL
   // side of `isSpendLimitRefusal`'s 🔴 rule, whose whole point is that a missed
   // top-up costs an unhelpful error message while a wrong one sells Buzz for a
-  // problem money cannot solve. Every terminal transition refetches, so the
-  // window closes on its own at the next settle.
+  // problem money cannot solve.
+  //
+  // 🔴 WHAT ACTUALLY CLOSES THE WINDOW, ENUMERATED — this said "every terminal
+  // transition refetches", which was the same over-claim round 5 was corrected
+  // on twelve lines below, made again about a wider set. There are exactly FOUR
+  // `refetchBalanceRef.current()` sites: `cancelJob`, the poll loop's terminal
+  // branch, the terminal-on-reply arm of the submit `try`, and the submit
+  // `catch` (added in round 8, because its `patchJob` writes `'failed'`, which
+  // IS in `JOB_TERMINAL`, and no poll loop exists to fire the other one).
+  // Together those cover every transition that ENDS a job this block started.
+  //
+  // The one hole left is `dismissJob` on a job still in flight: it kills the
+  // poll token, drops the card, and does not refetch. That is deliberate rather
+  // than missing — dismiss ABANDONS a workflow instead of ending it (unlike
+  // `cancelJob` it sends no server-side cancel), so the workflow keeps running
+  // and may charge AFTER the dismiss. No read taken here could be the final
+  // figure. The residual it leaves is exactly the stale-HIGH case above, and it
+  // closes at the next of the four.
   const knownBuzzBalance = buzzBalance;
   const spend: SpendContext = {
     balance: knownBuzzBalance,
@@ -254,20 +270,30 @@ export function App() {
   // is written at exactly ONE site (the submit reply) and read by both
   // classification sites, so the two cannot disagree about whether a job ran.
   //
-  // 🔴 WHAT THE TWO READS ACTUALLY CARRY, MEASURED — this comment used to imply
-  // they carry a decision each, and they do not. Hardcoding the poll site's
-  // `accepted` to `true` and the submit site's to `false` each leaves the whole
-  // suite green, because both are INVARIANT:
+  // 🔴 WHAT THE THREE READS ACTUALLY CARRY, MEASURED — this comment used to
+  // imply they carry a decision each, and they do not. Hardcoding the poll
+  // site's `accepted` to `true` and the submit site's to `false` each leaves the
+  // whole suite green, because both are INVARIANT (round 7 enumerated only these
+  // two while the same commit was adding the third, below):
   //   - poll site: `runJobPollLoop` is started from exactly one place, under
   //     `!JOB_TERMINAL.has(snap.status)`, and `'failed'` is in `JOB_TERMINAL` —
   //     so a job that reaches a poll loop is one the `!== 'failed'` add already
   //     put in the set. Membership there is always `true`.
-  //   - submit site: membership is `true` exactly when `snap.status !== 'failed'`,
-  //     and `isSpendLimitRefusal`'s own second clause returns `false` on that
-  //     same condition. The read is REDUNDANT with the predicate, not wrong.
-  // What IS pinned (8 tests) is the add condition at the submit reply: inverting
-  // it marks genuine refusals as accepted, and the lifecycle clause then swallows
-  // every real shortfall. So the set's value is the single DERIVATION, not the
+  //   - submit-reply site: membership is `true` exactly when
+  //     `snap.status !== 'failed'`, and `isSpendLimitRefusal`'s own second clause
+  //     returns `false` on that same condition. The read is REDUNDANT with the
+  //     predicate, not wrong.
+  //   - submit-THROW site (the third, added in round 7): membership is always
+  //     `false`. The `add` above sits on the line after `await submit()`, so a
+  //     throw never reaches it, and `localId` is minted fresh per click. Reading
+  //     the set here can only ever return `false` — which is the value the
+  //     lifecycle clause needs, arrived at by derivation rather than a literal.
+  // What IS pinned (10 tests — round 7 said 8, before the two harness pins it
+  // added in the same commit also began firing) is the add condition at the
+  // submit reply: inverting it marks genuine refusals as accepted, and the
+  // lifecycle clause then swallows every real shortfall. Measured at round 8 on
+  // a `cp -a` copy: 10 failed / 178 passed of 188. So the set's value is the
+  // single DERIVATION, not the
   // reads: it is what keeps the poll site correct if a second caller of
   // `runJobPollLoop` ever appears for a job the host did not accept, and what
   // keeps the invariant checkable instead of restated as a literal at each read.
@@ -754,8 +780,13 @@ export function App() {
         // `err.message` verbatim would have put
         // "estimate did not return a usable price (failed) — reason on
         // .snapshot.error" in front of a user.
-        const serverReason =
-          err instanceof WorkflowEstimateError ? err.snapshot?.error : undefined;
+        // 🔴 ONLY A REJECTION THAT CARRIES A SNAPSHOT IS A DECISION — the same
+        // rule the submit catch runs on, and this site is why round 8 exists:
+        // round 7 closed the shape at the submit catch and left it open here,
+        // byte-identical, one site away.
+        const estimateSnapshot =
+          err instanceof WorkflowEstimateError ? err.snapshot ?? null : null;
+        const serverReason = estimateSnapshot?.error;
         // 🔴 THE OTHER NEVER-STARTED ARM. A refused estimate priced nothing and
         // queued nothing, so it is a genuine refusal and a shortfall here IS
         // top-up-fixable — this is the case round 4 was right to stop excluding
@@ -764,13 +795,31 @@ export function App() {
         // returned snapshot BEFORE any rejection"), which is how this used to
         // reach the CTA implicitly; now it is classified explicitly, from the
         // snapshot the rejection carries.
-        setSpendLimited(
-          isSpendLimitRefusal(
-            err instanceof WorkflowEstimateError ? err.snapshot : null,
-            spendRef.current,
-            { accepted: false }
-          )
-        );
+        //
+        // 🔴 AND A REJECTION THAT CARRIES NONE LEAVES THE VERDICT STANDING.
+        // `estimate()` also rejects at the TRANSPORT — `sendTypedRequest` hitting
+        // `WORKFLOW_REQUEST_TIMEOUT_MS`, or a dead bridge — and the SDK's
+        // `estimate` catch RETHROWS the raw error, so what lands here is a plain
+        // `Error` with no `snapshot`. This used to pass `null` to the predicate,
+        // which fails toward NOT-a-shortfall and therefore CLEARED a live,
+        // correct verdict that nothing had refuted:
+        //
+        //   viewer holds 5, quote 42, submit replies a genuine priced refusal →
+        //   verdict true, "Top up · 500", the spend-limit copy, no Generate. The
+        //   post-submit re-quote at the bottom of `handleGenerate` fires
+        //   immediately, the bridge is down, `estimate()` rejects with a plain
+        //   `Error` — top-up gone, copy gone, Generate back, while the job card
+        //   beside it still reads "This generation hit a Buzz spend limit."
+        //
+        // A `null` snapshot is not the predicate answering "not a shortfall"; it
+        // is the predicate being asked a question with no subject. Don't ask.
+        if (estimateSnapshot) {
+          setSpendLimited(
+            isSpendLimitRefusal(estimateSnapshot, spendRef.current, {
+              accepted: false,
+            })
+          );
+        }
         // eslint-disable-next-line no-console
         console.warn('[gfm] estimate rejected', {
           attempt: myId,
@@ -1124,25 +1173,43 @@ export function App() {
       // reason the resolved path does, so a change in what the SDK throws
       // cannot silently turn into a wrong hardcoded answer here.
       //
-      // ⚠️ THAT SECOND HALF IS NOT TEST-PINNED, deliberately. Replacing the
-      // predicate call below with a literal `false` SURVIVES the whole suite,
-      // and no honest fixture can kill it: `submit()` throws only under
+      // ⚠️ WHAT IS AND IS NOT PINNED HERE — CORRECTED IN ROUND 8. Round 7 wrote
+      // "replacing the predicate call below with a literal `false` SURVIVES the
+      // whole suite, and no honest fixture can kill it". The first half is now
+      // MEASURABLY FALSE: that mutant is killed by `R8 F2` in
+      // `spend-verdict.test.tsx`, on `Unable to find role="button" and name
+      // /Top up/`. The second half is why round 7 believed it, and it still
+      // stands as a fact about the SDK — `submit()` throws only under
       // `status === 'failed' && typeof cost?.total !== 'number'`, so every
-      // snapshot that can reach this line is UNPRICED and the predicate answers
-      // `false` for all of them. For every shape the SDK can actually throw, this
-      // block produces exactly the answer the old unconditional clear did — the
-      // only behaviour that changed is the snapshot-LESS throw above. Calling
-      // the predicate anyway costs nothing and removes the dependency on a
-      // reading of the SDK's throw conditions that was already wrong once.
+      // snapshot that can really reach this line is UNPRICED and the predicate
+      // answers `false` for all of them.
+      //
+      // What changed is the fixture, not the SDK: `R8 F2` fabricates a PRICED
+      // thrown snapshot the SDK cannot currently produce, because the property
+      // under test is this block's own — that the verdict and the card copy come
+      // from ONE call — and that property has to hold whatever the SDK throws.
+      // It is labelled a seam guard over an unproducible fixture there; read it
+      // as pinning the coupling, not a reachable user-facing defect.
+      //
+      // For every shape the SDK can actually throw today, this block still
+      // produces exactly the answer the old unconditional clear did — the only
+      // behaviour that changed is the snapshot-LESS throw above. Calling the
+      // predicate anyway costs nothing and removes the dependency on a reading
+      // of the SDK's throw conditions that was already wrong once.
       const thrownSnapshot =
         err instanceof WorkflowSubmitError ? err.snapshot ?? null : null;
-      if (thrownSnapshot) {
-        setSpendLimited(
-          isSpendLimitRefusal(thrownSnapshot, spendRef.current, {
-            accepted: jobAcceptedRef.current.has(localId),
-          })
-        );
-      }
+      // 🔴 ONE CALL, BOTH CONSUMERS — the property the other three sites have
+      // structurally, and this one had only by convention until round 8. The
+      // verdict below and the card copy at the bottom of this block are now
+      // written from THIS boolean, so they cannot classify one snapshot
+      // differently. A snapshot-less throw decided nothing, so `refused` is
+      // `false` and neither consumer moves.
+      const refused =
+        thrownSnapshot != null &&
+        isSpendLimitRefusal(thrownSnapshot, spendRef.current, {
+          accepted: jobAcceptedRef.current.has(localId),
+        });
+      if (thrownSnapshot) setSpendLimited(refused);
       const submitReason = thrownSnapshot?.error;
       // eslint-disable-next-line no-console
       console.warn('[gfm] submit rejected', {
@@ -1153,24 +1220,61 @@ export function App() {
       });
       patchJob(localId, {
         status: 'failed',
-        // `exception` = nothing was queued and no money moved. `workflow-failed`
-        // = a workflow-shaped reply came back already failed. The SDK is
-        // emphatic that these differ on whether money may have moved, so they
-        // do not share a sentence.
-        error:
-          err instanceof WorkflowSubmitError && err.code === 'workflow-failed'
+        // 🔴 THE MONEY ANSWER WINS, AND IT IS THE ONE COMPUTED ABOVE. Until
+        // round 8 this was a fixed string branched on `err.code` alone, so the
+        // fourth classification site wrote the CTA from the predicate and the
+        // card from a literal — the exact two-consumers-disagreeing shape the
+        // one predicate exists to prevent, reintroduced by the site that was
+        // added to close it. Unobservable today only because every snapshot the
+        // SDK can throw is UNPRICED (see the ⚠️ above), which is a fact about
+        // the SDK's throw conditions, not about this block.
+        //
+        // Below the money answer, `exception` = nothing was queued and no money
+        // moved, `workflow-failed` = a workflow-shaped reply came back already
+        // failed. The SDK is emphatic that these differ on whether money may
+        // have moved, so they do not share a sentence.
+        error: refused
+          ? viewerFailureText(true)
+          : err instanceof WorkflowSubmitError && err.code === 'workflow-failed'
             ? 'This generation failed to start.'
             : "Couldn't submit this generation.",
       });
+      // 🔴 THIS IS A TERMINAL TRANSITION, SO IT REFETCHES — round 8's F3. The
+      // patch above puts the job in `'failed'`, which IS in `JOB_TERMINAL`, and
+      // no poll loop was ever started for it, so neither of the other refetch
+      // sites can fire. Without this the block was left holding a balance from
+      // before the submit AND (after round 7) a standing verdict, with nothing
+      // scheduled to refresh either — which is what made the sentence on
+      // `knownBuzzBalance` ("every terminal transition refetches", the licence
+      // for the accepted stale-HIGH residual) false on the one path round 7
+      // changed.
+      //
+      // 🔴 SAFE BECAUSE THE VERDICT IS STORED, NOT DERIVED (round 6's leg 2):
+      // the figure this fetches can no longer re-classify a decision already
+      // made, so a refetch here cannot resurrect round 6's F1. Measured, not
+      // assumed — `R8 F3` in `spend-verdict.test.tsx` moves the balance to one
+      // that would flip the verdict if anything still re-derived it, and asserts
+      // the CTA and both copies are unchanged.
+      refetchBalanceRef.current();
     }
   };
 
   // 🔴 `spendLimited` IS THE STORED VERDICT (declared with the other CTA state
   // above), not a live derivation. Every classification in this component runs
-  // at exactly three sites — the estimate settle, the submit reply, the poll
-  // terminal — and each one writes BOTH this value and the job card's copy from
-  // the SAME call, so the two consumers cannot classify one snapshot
-  // differently however the balance moves afterwards.
+  // at exactly FOUR sites — the estimate rejection, the submit reply, the submit
+  // throw, the poll terminal — and each one writes BOTH this value and the job
+  // card's copy from the SAME call, so the two consumers cannot classify one
+  // snapshot differently however the balance moves afterwards.
+  //
+  // 🔴 THAT COUNT WAS THREE UNTIL ROUND 8, AND THE FOURTH SITE ONLY OBEYED THE
+  // INVARIANT BY CONVENTION. Round 7 added the submit-throw site, which wrote
+  // the verdict from the predicate while the card beside it took a literal
+  // branched on `err.code` — so the sentence above went on asserting a property
+  // the code had just stopped having. It was unobservable, because every
+  // snapshot `submit()` can throw is unpriced and the predicate answers `false`
+  // for all of them; had that ever changed, the CTA would have said "spend limit
+  // / Top up" beside a card saying "This generation failed to start." The card
+  // write now takes the same boolean, so the property is structural at all four.
   //
   // 🔴 IT USED TO READ `const spendLimited = isSpendLimitRefusal(result, spend)`
   // on every render, over the hook's shared `result`. That is what made round
@@ -2663,9 +2767,13 @@ type JobLifecycle = {
  * top-up can actually fix?
  *
  * 🔴 THE ONE PREDICATE. It decides the money CTA, the copy under it, and — via
- * `viewerFailureText` — the job card. Each of the three classification sites
+ * `viewerFailureText` — the job card. Each of the FOUR classification sites (the
+ * estimate rejection, the submit reply, the submit throw, the poll terminal)
  * calls it ONCE and hands the same boolean to both consumers, so a snapshot is
- * classified exactly once and both surfaces render that one answer.
+ * classified exactly once and both surfaces render that one answer. The count
+ * read "three" until round 8; the submit-throw site round 7 added took the
+ * predicate for the CTA and a literal for the card, and is now paired like the
+ * rest — see the 🔴 above `spendLimited`'s render-time note.
  *
  * 🔴 THE RESIDUAL, NAMED RATHER THAN HIDDEN. Two earlier ones are now closed:
  * both card write sites used to be gated on `snap.error` being truthy (a priced

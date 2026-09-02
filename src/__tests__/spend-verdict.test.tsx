@@ -586,3 +586,236 @@ describe('R7 F2 — the harness mechanisms the money tests rest on, actually pin
     ).toHaveLength(2);
   });
 });
+
+/* ------------------------------------------------------------------ *
+ *  ROUND 8 — the same shapes, at the sites round 7 did not sweep.
+ * ------------------------------------------------------------------ */
+
+describe('R8 F1 — a transport-level ESTIMATE rejection must not wipe a live verdict', () => {
+  it('🔴 a plain-Error estimate rejection leaves the stored verdict standing', async () => {
+    // 🔴 ROUND 7'S OWN DEFECT, ONE SITE OVER. Round 7 closed exactly this shape
+    // at the submit catch and left it byte-identical at the estimate catch,
+    // where it is not merely reachable but fires on the app's BUSIEST path: the
+    // post-submit re-quote runs after every single submit.
+    //
+    // The measured screen, in the numbers it was reported in. The viewer holds
+    // 5, the quote is 42, and submit replies a genuine priced refusal — never
+    // queued, top-up-fixable — so the verdict is true and correct: "Top up ·
+    // 500", the spend-limit copy in BOTH places, no Generate button. The
+    // re-quote at the bottom of `handleGenerate` fires immediately; the bridge
+    // is down, so `estimate()` rejects with a plain `Error` (the SDK's estimate
+    // catch RETHROWS the raw error rather than wrapping it). The old code handed
+    // the predicate `null` for the missing snapshot, `null` fails toward
+    // NOT-a-shortfall, and the verdict was cleared by a rejection that had
+    // decided nothing: top-up gone, copy gone, Generate back — while the job
+    // card beside it still read "This generation hit a Buzz spend limit."
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.submit.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: PRICE },
+    } as never);
+
+    // Mount with a WORKING estimate so the Generate button is on screen...
+    await renderApp(<App />);
+    // ...then break the bridge, so the post-submit re-quote is the transport
+    // rejection under test. NOT `freezeEstimate` — the rejection is the event.
+    spies.estimate.mockRejectedValue(new Error('bridge request timed out'));
+
+    await clickGenerate();
+
+    // POSITIVE CONTROL, twice over: the refusal really was classified (the card
+    // carries the money copy), and the estimate really did reject afterwards
+    // (its own error line is on screen). Without both, every assertion below
+    // passes just as happily if the re-quote never ran at all — which is the
+    // shape that hid this for a whole round.
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "Couldn't estimate cost: the estimate service is unavailable — try again in a moment."
+        )
+      ).toBeInTheDocument()
+    );
+    // 🔴 PIN THE PROPERTY THE FIX TURNS ON, not just the outcome: what came out
+    // of `estimate()` is NOT a `WorkflowEstimateError`, so it carries no
+    // `snapshot`, and there was never anything for the predicate to classify.
+    const lastEstimate = spies.estimate.mock.results.at(-1)?.value;
+    await expect(lastEstimate).rejects.toBeInstanceOf(Error);
+    await expect(lastEstimate).rejects.not.toBeInstanceOf(WorkflowEstimateError);
+
+    // All four user-visible parts of the verdict, still there — and the copy in
+    // BOTH places, which is what makes the card-vs-CTA disagreement visible.
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(
+      screen.getAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(2);
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
+    expect(spies.openPurchaseModal).not.toHaveBeenCalled();
+  });
+
+  it('a WorkflowEstimateError that DOES carry a snapshot still re-decides the verdict', async () => {
+    // ⚠️ INVARIANT GUARD, NOT REGRESSION COVERAGE — it passes on pre-change code
+    // too. It exists so the F1 fix cannot be "stop writing the verdict in the
+    // estimate catch at all": a `WorkflowEstimateError` carries the host's
+    // snapshot, which IS a decision, and the one predicate must make it. Here
+    // the snapshot is `succeeded`/`no-cost` — not a refusal — so the predicate
+    // answers `false` and a standing verdict CLEARS, because the rule said so
+    // and not because a literal was typed here.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } });
+    spies.submit.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: PRICE },
+    } as never);
+
+    await renderApp(<App />);
+    spies.estimate.mockRejectedValue(
+      new WorkflowEstimateError({ workflowId: 'w', status: 'succeeded' } as never, 'no-cost')
+    );
+    await clickGenerate();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText("Couldn't estimate cost: no price came back for these settings.")
+      ).toBeInTheDocument()
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull()
+    );
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+  });
+});
+
+describe('R8 F2 — the fourth classification site writes BOTH consumers from one call', () => {
+  it('🔴 a PRICED thrown snapshot puts the same sentence on the card and the CTA', async () => {
+    // ⚠️ SEAM GUARD OVER A FIXTURE TODAY'S SDK CANNOT PRODUCE — say so plainly.
+    // `submit()` throws only under `status === 'failed' && typeof cost?.total
+    // !== 'number'`, so every snapshot that can really reach the catch is
+    // UNPRICED and the predicate answers `false` for all of them. This test
+    // fabricates a PRICED one, so it pins the app's INTERNAL coupling, not a
+    // defect a viewer can hit today.
+    //
+    // It is still regression coverage, and it is RED at 8f05293: round 7 added
+    // this fourth classification site and wired the verdict to the predicate
+    // while leaving the card copy a literal branched on `err.code`. On this
+    // fixture the base therefore renders "Top up" + "This generation hit a Buzz
+    // spend limit." beside a card reading "This generation failed to start." —
+    // the two-consumers-disagreeing shape the one predicate exists to prevent,
+    // reintroduced by the commit that was closing it. The comment above
+    // `spendLimited` asserted the opposite for a whole round.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.submit.mockRejectedValue(
+      new WorkflowSubmitError(
+        { workflowId: 'failed', status: 'failed', cost: { total: PRICE } } as never,
+        'workflow-failed'
+      )
+    );
+
+    await renderApp(<App />);
+    // The `isRegenerate` flip re-quotes after every submit, and a SUCCESSFUL
+    // re-quote clears the verdict on purpose. Freeze it so what is asserted is
+    // a state rather than a race.
+    freezeEstimate();
+    await clickGenerate();
+
+    // POSITIVE CONTROL: we are in the catch, and the predicate said "refusal".
+    await waitFor(() => expect(spies.submit).toHaveBeenCalled());
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+
+    // ONE sentence, in BOTH places. At the base the card holds the `err.code`
+    // literal instead and this is 1.
+    expect(
+      screen.getAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(2);
+    // ...and specifically NOT the code-branched copy, which is the money answer
+    // being overridden by a literal.
+    expect(screen.queryByText('This generation failed to start.')).toBeNull();
+  });
+
+  // 🔴 NO SECOND TEST HERE, AND THAT IS A MEASUREMENT. The other half of this
+  // fix — that BELOW the money answer `workflow-failed` and `exception` still
+  // carry their own sentences — is already pinned by `queue.test.tsx > a THROWN
+  // workflow-failed submit says something different from a plain exception`.
+  // A guard was written for it and then deleted: collapsing the two code
+  // branches into one sentence killed the new guard AND that existing test with
+  // the identical message ("Unable to find an element with the text: This
+  // generation failed to start."), so the new one died for a neighbour's reason
+  // and added no coverage the suite lacked. A duplicate that reads as coverage
+  // while providing none is worse than none.
+});
+
+describe('R8 F3 — a submit that throws is a terminal transition, so it re-reads the balance', () => {
+  it('🔴 the submit catch refetches, and the stored verdict survives the new figure', async () => {
+    // 🔴 THE SENTENCE THIS MAKES TRUE. `knownBuzzBalance`'s comment licenses an
+    // accepted stale-HIGH residual with "every terminal transition refetches, so
+    // the window closes on its own at the next settle" — and the submit catch
+    // patches the job to `'failed'`, which IS in `JOB_TERMINAL`, while starting
+    // no poll loop. So on the one path round 7 changed, the block was left
+    // holding a pre-submit balance AND a standing verdict with nothing scheduled
+    // to refresh either: the residual's own escape hatch was missing exactly
+    // where round 7 had just made the state persist.
+    //
+    // 🔴 AND THE MEASUREMENT THAT SAYS THE REFETCH IS SAFE TO ADD, rather than
+    // an assumption. The new balance (500) COVERS the price (42), so if anything
+    // still re-derived the verdict from the balance — round 6's F1 — this
+    // refetch would clear a correct refusal the instant it landed. It does not,
+    // because round 6's leg 2 made the verdict stored rather than derived. Both
+    // halves are asserted below: the refetch fired, the figure really moved to
+    // the flipping value, and the money surface is untouched.
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    setMockBuzzBalanceRefetch({
+      kind: 'resolves',
+      balance: { blue: 0, green: 0, yellow: 500 }, // covers 42 — would flip it
+    });
+    // Arrive at a real, correct spend-limit state via the estimate path.
+    spies.estimate.mockRejectedValue(
+      new WorkflowEstimateError(
+        { workflowId: 'wf_est', status: 'failed', cost: { total: PRICE } } as never,
+        'failed'
+      )
+    );
+    await renderApp(<App />);
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+    freezeEstimate();
+
+    // Nothing has settled a job yet, so nothing has refetched yet.
+    spies.refetchBuzzBalance.mockClear();
+
+    // The CTA is not a gate — `PromptTextarea` is mounted `disabled={false}`, so
+    // Ctrl+Enter reaches `handleGenerate` with the top-up button on screen.
+    spies.submit.mockRejectedValue(new Error('bridge request timed out'));
+    await userEvent.click(screen.getByLabelText('Prompt (optional)'));
+    await userEvent.keyboard('{Control>}{Enter}{/Control}');
+
+    // POSITIVE CONTROL: we are in the catch.
+    await waitFor(() =>
+      expect(screen.getByText("Couldn't submit this generation.")).toBeInTheDocument()
+    );
+    // The claim itself. RED at 8f05293, where this path refetches nothing.
+    expect(spies.refetchBuzzBalance).toHaveBeenCalledTimes(1);
+    // ...and it really moved the figure, to one that COVERS the price.
+    await waitFor(() => expect(getMockBuzzBalance().balance?.yellow).toBe(500));
+
+    // The safety half: a decided verdict is not re-decided by the figure its own
+    // refetch fetched.
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
+  });
+});
