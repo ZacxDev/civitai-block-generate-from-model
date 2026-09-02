@@ -7,7 +7,7 @@
  *   Any other error    → unchanged: error text inside the alert box, no CTA
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { screen } from '@testing-library/react';
+import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
@@ -160,23 +160,43 @@ describe('Insufficient-buzz error → prominent Top-Up CTA (delta #10)', () => {
     expect(screen.queryByText(/insufficient balance/)).toBeNull();
   });
 
-  it('does not LATCH: a later success clears the top-up CTA and Generate returns', async () => {
+  it('does not LATCH: a later successful re-estimate clears the top-up CTA and Generate returns', async () => {
     // 🔴 REGRESSION GUARD. An earlier fix held the failure text in state and
     // never cleared it, so ONE budget-worded failure pinned the CTA to "Top up"
     // permanently — measured: after a successful re-estimate the block had NO
-    // Generate button at all. The rule must be derived from current state, not
-    // remembered.
+    // Generate button at all.
+    //
+    // 🔴 ROUND 6 REWRITE, AND THE REWRITE IS THE POINT. This used to "recover"
+    // by mutating the hook's shared `result` to null and re-rendering, which
+    // worked only because the CTA re-derived its verdict from `result` on every
+    // render — i.e. the test was pinned to the very mechanism that produced F1
+    // and F2 (a live re-derivation over an input that moves under it). The
+    // verdict is now STORED at decision time, so a bare re-render correctly
+    // changes nothing; recovery has to be a real DECISION. It is: the block's
+    // actual way out of this screen is to re-quote (pick another showcase /
+    // change a param), and a resolved estimate clears the verdict. Driving that
+    // path is also a stronger claim than the old one — it proves the user can
+    // actually get back to Generate, which mutating `result` never did.
     refuseEstimateWith(REFUSAL);
-    const { rerender } = await renderApp(<App />);
+    await renderApp(<App />);
     expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
 
-    // The user tops up; the next call succeeds.
-    setMockWorkflow({ status: 'idle', result: null, error: null });
-    rerender(<App />);
-    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    // The user picks a different preview → the identity effect re-quotes, and
+    // this time a price comes back.
+    getMockSpies().estimate.mockResolvedValue({
+      workflowId: 'wf_estimate',
+      status: 'pending',
+      cost: { total: 12 },
+    } as never);
+    await userEvent.click(screen.getByRole('button', { name: 'Pick preview 2' }));
+
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull()
+    );
     expect(
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     ).toBeInTheDocument();
+    expect(screen.queryByText('This generation hit a Buzz spend limit.')).toBeNull();
   });
 
   it('clicking Top-Up calls openPurchaseModal with budget * 10', async () => {
@@ -263,18 +283,43 @@ describe('a priced refusal is only a SHORTFALL when the balance cannot cover it'
     expectNoMoneyCta();
   });
 
-  it('balance LOADING over a stale figure → no purchase CTA', async () => {
-    // A refetch in flight is a figure being replaced. Reasoning about the old
-    // one is how a debit from the job that just failed misclassifies the next
-    // refusal.
+  // 🔴 THESE TWO ARE INVERTED FROM ROUND 5, DELIBERATELY, AND THAT IS THE F2
+  // FIX. They used to assert that `loading` or `error` on the balance fetch
+  // SUPPRESSED the money CTA — "a figure being replaced is unknown, and unknown
+  // must not read as short". Measured in round 6, that rule is what produced
+  // the defect: `refetch()` sets `loading` synchronously, so a genuine
+  // shortfall's top-up CTA blanked itself for one bridge round-trip and put
+  // back a Generate button that would fail identically, and a refetch that
+  // FAILED left it that way until the next terminal workflow — a viewer who
+  // truly cannot afford the generation, permanently offered no way to fix it.
+  //
+  // The SDK never nulls a balance it once fetched (`useBuzzBalance.js` sets
+  // only `loading`/`error`), so during either state `balance` still holds the
+  // last figure a fetch actually returned. That figure is sound here because of
+  // the lifecycle clause: the only failures classified at all are ones the host
+  // never accepted, so no debit has landed and the last read is still current.
+  it('balance LOADING over the last known figure → the verdict is UNCHANGED', async () => {
     setMockBuzzBalance({ balance: BROKE, loading: true });
     refuseEstimateWith(REFUSAL);
     await renderApp(<App />);
-    expectNoMoneyCta();
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
   });
 
-  it('balance fetch ERRORED → no purchase CTA', async () => {
+  it('balance fetch ERRORED over the last known figure → the verdict is UNCHANGED', async () => {
     setMockBuzzBalance({ balance: BROKE, error: new Error('host refused') });
+    refuseEstimateWith(REFUSAL);
+    await renderApp(<App />);
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(screen.getByText('This generation hit a Buzz spend limit.')).toBeInTheDocument();
+  });
+
+  it('NEVER-fetched balance stays unknown even while loading → no purchase CTA', async () => {
+    // The negative control for the pair above, and the case the old rule was
+    // really reaching for. `null` means no fetch has EVER succeeded, which the
+    // two states above do not imply — and it must still fail toward
+    // NOT-a-shortfall.
+    setMockBuzzBalance({ balance: null, loading: true });
     refuseEstimateWith(REFUSAL);
     await renderApp(<App />);
     expectNoMoneyCta();

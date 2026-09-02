@@ -443,7 +443,15 @@ describe('Generation queue (task 3)', () => {
 
   it('a priced refusal with NO server text still fills the job card (poll site)', async () => {
     // Same gap at the other write site — the one an asynchronously-failing job
-    // actually takes.
+    // actually takes: a `failed` reply carrying no `error` string must still
+    // produce card copy rather than a silent card.
+    //
+    // 🔴 ROUND 6 INVERTED THE VERDICT THIS ASSERTS (it demanded the spend-limit
+    // sentence, twice). A poll failure only ever reaches this block on a job
+    // whose `submit()` already replied non-`failed` — i.e. one the host
+    // ACCEPTED and, per the SDK, already charged. It cannot be an affordability
+    // refusal at any balance. The claim being kept is the one this test was
+    // written for: the card is not silent.
     const spies = getMockSpies();
     setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 0 } });
     spies.submit.mockResolvedValue({ workflowId: 'wf_sil2', status: 'pending' } as never);
@@ -458,17 +466,25 @@ describe('Generation queue (task 3)', () => {
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
-      expect(
-        screen.getAllByText('This generation hit a Buzz spend limit.')
-      ).toHaveLength(2);
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
     });
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
   });
 
-  it('the SAME priced poll failure IS a spend limit when the viewer cannot cover it', async () => {
-    // The positive control for the case above: identical snapshot, identical
-    // token, only the balance moved. Without this pair the block could be
-    // refusing to offer a top-up for every priced failure and the assertions
-    // above would all still pass.
+  it('🔴 the SAME priced poll failure is STILL not a spend limit at ANY balance', async () => {
+    // 🔴 ROUND 6, THE HEART OF F1. This test used to be the POSITIVE CONTROL
+    // for the guard above it — same snapshot, only the balance moved, therefore
+    // a spend limit. It was asserting the defect. `1+1+1 = 3 < 42` says the
+    // viewer cannot afford 42, and that arithmetic is TRUE and IRRELEVANT: this
+    // job was accepted and charged, so the 42 is already gone and the reason it
+    // died was moderation. Selling this viewer Buzz fixes nothing.
+    //
+    // The real positive control for the money CTA is the SUBMIT-site refusal
+    // ("a PRICED refusal on submit the viewer CANNOT afford…") — a job that was
+    // never queued, where a top-up genuinely is the fix. The discriminator is
+    // acceptance; the balance is only consulted once acceptance has been ruled
+    // out.
     const spies = getMockSpies();
     setMockBuzzBalance({ balance: { blue: 1, green: 1, yellow: 1 } }); // 3 < 42
     spies.submit.mockResolvedValue({ workflowId: 'wf_p2', status: 'pending' } as never);
@@ -484,10 +500,15 @@ describe('Generation queue (task 3)', () => {
       screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
     );
     await waitFor(() => {
-      expect(
-        screen.getAllByText('This generation hit a Buzz spend limit.')
-      ).toHaveLength(2);
+      expect(screen.getByText('This generation failed.')).toBeInTheDocument();
     });
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    // The real failure surface is not suppressed.
+    expect(screen.getByText('Generation failed.')).toBeInTheDocument();
   });
 
   it('a spy-driven priced refusal reaches the CTA — the mock publishes `result` like the hook', async () => {

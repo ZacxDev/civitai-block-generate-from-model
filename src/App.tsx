@@ -182,15 +182,13 @@ export function App() {
   const settings = useBlockSettings();
   const { submit, estimate, poll, cancel, status, result, error } = useBuzzWorkflow();
   const { openPurchaseModal } = useBuzzPurchase();
-  // 🔴 Unconditional, component-level, ONE call. What the viewer can actually
-  // spend is the only structural signal that separates a refusal a top-up can
-  // fix from one it cannot — see `isSpendLimitRefusal`.
-  const {
-    balance: buzzBalance,
-    loading: buzzBalanceLoading,
-    error: buzzBalanceError,
-    refetch: refetchBuzzBalance,
-  } = useBuzzBalance();
+  // 🔴 Unconditional, component-level, ONE call. Once a refusal is known to be
+  // a job that never started (`isSpendLimitRefusal`'s lifecycle clause), what
+  // the viewer can spend is what separates the shortfall a top-up fixes from
+  // the priced refusals it cannot.
+  //
+  // `loading` and `error` are deliberately NOT read: see `knownBuzzBalance`.
+  const { balance: buzzBalance, refetch: refetchBuzzBalance } = useBuzzBalance();
   const checkpointPicker = useCheckpointPicker();
   // Latest poll fn in a ref so the per-job poll loops (started inside
   // handleGenerate, which closes over the submit-time `poll`) always call
@@ -198,11 +196,27 @@ export function App() {
   const pollRef = useRef(poll);
   pollRef.current = poll;
 
-  // The balance we are willing to REASON about: only a settled, error-free
-  // read. A fetch in flight is reasoning about a figure that is being replaced,
-  // and a failed fetch leaves whatever the last success returned — both are
-  // "unknown", and unknown must fail toward NOT-a-shortfall (see the predicate).
-  const knownBuzzBalance = buzzBalanceLoading || buzzBalanceError ? null : buzzBalance;
+  // The balance we reason about is the SDK's `balance` field as-is: the last
+  // value a fetch successfully returned, or `null` before the first one ever
+  // did. `useBuzzBalance` never clears it — `refetch()` flips `loading` and a
+  // failure sets `error`, both leaving the last good figure in place — so
+  // `null` means exactly "we have never known", which is the only case that
+  // must fail toward NOT-a-shortfall.
+  //
+  // 🔴 THIS USED TO NULL THE BALANCE WHENEVER `loading` OR `error` WAS SET, and
+  // that was round 6's F2. `refetch()` sets `loading` SYNCHRONOUSLY, so every
+  // genuine shortfall blanked its own top-up CTA for one bridge round-trip and
+  // put the Generate button back — beside a card still reading "spend limit" —
+  // and a refetch that FAILED stranded that state until the next terminal
+  // workflow, permanently offering a Generate that would fail identically.
+  //
+  // Reading a possibly-stale figure is safe BECAUSE of the lifecycle clause in
+  // `isSpendLimitRefusal`: the only failures we classify are ones the host
+  // never accepted, so no debit has landed and the last settled read is still
+  // the viewer's real balance. The residual is the harmless direction — a
+  // viewer who topped up in another tab while a refetch is in flight may be
+  // offered a top-up they no longer need.
+  const knownBuzzBalance = buzzBalance;
   const spend: SpendContext = {
     balance: knownBuzzBalance,
     // The per-call ceiling the HOST enforces (`cost_estimate <= token.buzzBudget`).
@@ -217,6 +231,14 @@ export function App() {
   spendRef.current = spend;
   const refetchBalanceRef = useRef(refetchBuzzBalance);
   refetchBalanceRef.current = refetchBuzzBalance;
+  // 🔴 THE LIFECYCLE FACT THE MONEY PREDICATE TURNS ON: the set of jobs the
+  // host ACCEPTED. A `localId` lands here the moment `submit()` replies with
+  // any non-`failed` status, which per the SDK means the reservation was kept
+  // and the Buzz is committed ("A resolved submit is money-COMMITTED… we do NOT
+  // refund on a non-throwing failed snapshot" — `useBuzzWorkflow`). Membership
+  // is written at exactly ONE site (the submit reply) and read by both
+  // classification sites, so the two cannot disagree about whether a job ran.
+  const jobAcceptedRef = useRef<Set<string>>(new Set());
   // Tier-4 Delta A: rootRef is the outer (unpadded) measurement element
   // for useBlockResize. The SDK hook reads `ResizeObserverEntry.contentRect.height`
   // which is the CONTENT-box of the observed element — so any padding on
@@ -277,6 +299,24 @@ export function App() {
   // without actually exhausting a balance. Cleared by toggling off.
   const [forceZeroBuzz, setForceZeroBuzz] = useState(false);
   const [simulatedInsufficient, setSimulatedInsufficient] = useState(false);
+  // 🔴 THE STORED MONEY VERDICT — see `isSpendLimitRefusal`. Written ONCE per
+  // decision, at the instant an estimate or a workflow settles, from the
+  // snapshot and the balance as they were AT THAT INSTANT. It is deliberately
+  // NOT re-derived on every render.
+  //
+  // Round 6's F2: the CTA used to recompute the classification live over the
+  // hook's shared `result` while each job card had already frozen its own copy
+  // at write time. Two consumers, one rule, evaluated at different times — so a
+  // balance that moved between them (a refetch settling, a refetch flipping
+  // `loading`, a refetch failing) made them disagree on screen about the SAME
+  // snapshot. Storing the verdict removes the disagreement by construction.
+  //
+  // Semantics: this describes the MOST RECENT decision, exactly as the hook's
+  // shared `result` did. A later decision — a successful re-estimate, another
+  // job settling — replaces it. With several jobs in flight it therefore
+  // describes whichever settled last, which is the same residual the shared
+  // `result` had and is why every job card carries its own copy too.
+  const [spendLimited, setSpendLimited] = useState(false);
   // Estimated cost (yellow buzz) for the current params. Pulled from
   // estimate() snapshot, refreshed on mount + when the model identity
   // (checkpoint or selected showcase) changes.
@@ -330,6 +370,15 @@ export function App() {
       // (3) Mark terminal so the card renders as a "Canceled" slot (falls
       // into JOB_TERMINAL). Always patch — even when the token was missing.
       patchJob(localId, { status: 'canceled' });
+      // (4) 🔴 REFRESH THE BALANCE HERE TOO. Step (1) kills the poll token, so
+      // the poll loop's terminal branch — the only other place this fires —
+      // never runs for a cancelled job. Round 5 claimed a refetch happens on
+      // "every terminal workflow"; it did not happen on the one terminal
+      // transition the USER causes. A cancel can still have spent Buzz (the
+      // submit already committed the reservation; the orchestrator cancel is
+      // best-effort and races a workflow that may already have charged), so the
+      // figure the next decision is priced against must be re-read.
+      refetchBalanceRef.current();
     },
     [patchJob, cancel]
   );
@@ -373,6 +422,14 @@ export function App() {
         try {
           const snap = await pollRef.current(workflowId);
           if (token.cancelled) return;
+          // 🔴 CLASSIFY ONCE, HERE, and hand the ANSWER to both consumers —
+          // the card's copy below and the stored verdict the money CTA reads.
+          // Neither re-derives it later, so a balance that moves afterwards
+          // (this loop's own `refetchBalanceRef` call, for one) cannot
+          // re-classify a decision that has already been made.
+          const refused = isSpendLimitRefusal(snap, spendRef.current, {
+            accepted: jobAcceptedRef.current.has(localId),
+          });
           patchJob(localId, {
             status: snap.status as QueueJobStatus,
             cost: snap.cost?.total ?? null,
@@ -390,14 +447,25 @@ export function App() {
             // predicate visibly disagreeing, which is exactly what the
             // predicate exists to prevent.
             ...(snap.error || snap.status === 'failed'
-              ? { error: logAndMapFailure(snap, 'poll', spendRef.current, { workflowId }) }
+              ? { error: logAndMapFailure(snap, 'poll', refused, { workflowId }) }
               : {}),
           });
           if (JOB_TERMINAL.has(snap.status as QueueJobStatus)) {
+            // Publish the verdict computed ABOVE — before the refetch below can
+            // move the balance. For an accepted job `refused` is always false
+            // (the lifecycle clause), so in practice this CLEARS a stale
+            // verdict left by an earlier decision rather than setting one.
+            setSpendLimited(refused);
             // The workflow settled, so any debit has landed. Re-read the
-            // balance now: the ONE PREDICATE compares it against the next
-            // refusal's price, and a stale figure would classify that one
-            // against a wallet that no longer exists.
+            // balance now so the NEXT decision is priced against the wallet
+            // that exists after this job, not before it.
+            //
+            // 🔴 It can no longer re-classify THIS job: the verdict above is
+            // stored, not re-derived. That re-derivation was round 6's F1 — the
+            // post-debit figure this very call fetches was being compared
+            // against the price of the job that had just been charged, turning
+            // "your generation failed" into "you hit a Buzz spend limit" for
+            // money that was already gone.
             refetchBalanceRef.current();
             cleanup();
             return;
@@ -614,6 +682,12 @@ export function App() {
         console.debug('[gfm] estimate resolved', { attempt: myId, cost });
         setEstimatedCost(typeof cost === 'number' ? cost : null);
         setEstimateError(null);
+        // A price came back, so nothing is currently refused — clear any stored
+        // verdict. This is the block's real recovery path out of the top-up CTA
+        // (change a param / pick another showcase → re-quote → Generate
+        // returns), and it is the same transition that used to happen
+        // implicitly when this snapshot overwrote the hook's shared `result`.
+        setSpendLimited(false);
       })
       .catch((err: unknown) => {
         if (myId !== estimateInFlightRef.current) return;
@@ -630,6 +704,21 @@ export function App() {
         // .snapshot.error" in front of a user.
         const serverReason =
           err instanceof WorkflowEstimateError ? err.snapshot?.error : undefined;
+        // 🔴 THE OTHER NEVER-STARTED ARM. A refused estimate priced nothing and
+        // queued nothing, so it is a genuine refusal and a shortfall here IS
+        // top-up-fixable — this is the case round 4 was right to stop excluding
+        // when it removed a `phase === 'submit'` scope. `estimate()` publishes
+        // its snapshot BEFORE it rejects (SDK: "`result` is updated to the
+        // returned snapshot BEFORE any rejection"), which is how this used to
+        // reach the CTA implicitly; now it is classified explicitly, from the
+        // snapshot the rejection carries.
+        setSpendLimited(
+          isSpendLimitRefusal(
+            err instanceof WorkflowEstimateError ? err.snapshot : null,
+            spendRef.current,
+            { accepted: false }
+          )
+        );
         // eslint-disable-next-line no-console
         console.warn('[gfm] estimate rejected', {
           attempt: myId,
@@ -898,6 +987,18 @@ export function App() {
         // re-validates everything server-side; this is just for parity.
         params,
       });
+      // 🔴 RECORD THE LIFECYCLE FACT FIRST — this is the ONLY site that writes
+      // it. Any non-`failed` reply means the host took the workflow, and the
+      // SDK is explicit that a resolved submit is money-COMMITTED. From here on
+      // no failure this job reports can be an affordability refusal: it was
+      // funded. A `failed` reply is the opposite — never queued, no money moved
+      // — and is the arm where a refusal is possible at all.
+      if (snap.status !== 'failed') jobAcceptedRef.current.add(localId);
+      // Classify ONCE, from the snapshot and the balance as of this instant.
+      const refused = isSpendLimitRefusal(snap, spendRef.current, {
+        accepted: jobAcceptedRef.current.has(localId),
+      });
+      setSpendLimited(refused);
       // Hydrate the job with the returned workflowId + initial snapshot.
       patchJob(localId, {
         workflowId: snap.workflowId,
@@ -907,7 +1008,7 @@ export function App() {
         // Same widened condition as the poll site — see the note there.
         ...(snap.error || snap.status === 'failed'
           ? {
-              error: logAndMapFailure(snap, 'submit', spendRef.current, {
+              error: logAndMapFailure(snap, 'submit', refused, {
                 workflowId: snap.workflowId,
               }),
             }
@@ -942,6 +1043,13 @@ export function App() {
       // start showing "submit did not return a usable workflow
       // (workflow-failed) — reason on .snapshot.error" to a user. Branch on
       // `code`; the server's text goes to the console only.
+      // 🔴 A THROWN submit is NEVER an affordability refusal, so it clears the
+      // verdict rather than leaving an earlier decision's on screen. The SDK
+      // states it directly — "A BUDGET REJECTION NEVER ARRIVES HERE. It
+      // resolves, and is read off the returned snapshot as `status === 'failed'`
+      // with a numeric `cost.total`" — and both thrown codes carry an unpriced
+      // snapshot, which the predicate would reject anyway.
+      setSpendLimited(false);
       const submitReason =
         err instanceof WorkflowSubmitError ? err.snapshot?.error : undefined;
       // eslint-disable-next-line no-console
@@ -965,22 +1073,22 @@ export function App() {
     }
   };
 
-  // 🔴 ONE PREDICATE, TWO CONSUMERS. This decides BOTH the money CTA and the
-  // copy under it, and it used to be a second, different rule from the one
-  // `viewerFailureText` uses for the card — a substring match
-  // (`insufficient|not enough|budget|balance`) over the raw server sentence.
-  // That is how the block went on selling Buzz for "not enough VRAM available
-  // on the worker" and for a Prisma constraint named `accountBalance`, while a
-  // test asserting the opposite passed: the two rules lived at different sites,
-  // so fixing one left the other deciding the money.
+  // 🔴 `spendLimited` IS THE STORED VERDICT (declared with the other CTA state
+  // above), not a live derivation. Every classification in this component runs
+  // at exactly three sites — the estimate settle, the submit reply, the poll
+  // terminal — and each one writes BOTH this value and the job card's copy from
+  // the SAME call, so the two consumers cannot classify one snapshot
+  // differently however the balance moves afterwards.
   //
-  // 🔴 `result` IS THE HOOK'S SHARED SNAPSHOT — every resolved `poll` reply and
-  // the pre-rejection snapshot of a failed `estimate` land here, not just the
-  // submit reply. That is why "priced + failed" alone was wrong: a job that was
-  // charged and then failed mid-render, and an estimate refused before the user
-  // has clicked anything, both arrive on this exact value. The predicate's
-  // balance clause is what keeps them off the money CTA.
-  const spendLimited = isSpendLimitRefusal(result, spend);
+  // 🔴 IT USED TO READ `const spendLimited = isSpendLimitRefusal(result, spend)`
+  // on every render, over the hook's shared `result`. That is what made round
+  // 6's F1 possible: the terminal branch refetches the balance, the refetch
+  // returns the POST-DEBIT figure, and the render that followed re-classified
+  // the already-decided failure against it — putting "hit a Buzz spend limit"
+  // and a top-up button next to a card reading "This generation failed.", for
+  // money the SDK says is already committed and will not be refunded.
+  //
+  // Do not reintroduce a render-time call to `isSpendLimitRefusal` here.
 
   return (
     <div ref={rootRef} data-theme={theme === 'dark' ? 'dark' : 'light'} style={outerContainerStyle(theme)}>
@@ -2445,22 +2553,38 @@ type SpendContext = {
 };
 
 /**
+ * What the app knows about a job's LIFECYCLE at the moment it classifies one of
+ * that job's failures. See the `accepted` clause in {@link isSpendLimitRefusal}.
+ */
+type JobLifecycle = {
+  /**
+   * `true` once `submit()` has replied with any non-`failed` status for this
+   * job — the host took the workflow and the reservation is committed.
+   * `false` for an estimate refusal and for a submit reply that came back
+   * `failed`: neither was ever queued.
+   */
+  accepted: boolean;
+};
+
+/**
  * Is this resolved failure a TRUE BALANCE SHORTFALL — the one refusal family a
  * top-up can actually fix?
  *
  * 🔴 THE ONE PREDICATE. It decides the money CTA, the copy under it, and — via
- * `viewerFailureText` — the job card, so no two of them can classify the SAME
- * snapshot differently.
+ * `viewerFailureText` — the job card. Each of the three classification sites
+ * calls it ONCE and hands the same boolean to both consumers, so a snapshot is
+ * classified exactly once and both surfaces render that one answer.
  *
- * 🔴 THE RESIDUAL, NAMED RATHER THAN HIDDEN, because the previous version of
- * this sentence claimed they "can never disagree again" and that was false in
- * two ways. One is fixed: both card write sites used to be gated on
- * `snap.error` being truthy, so a priced `failed` with no server text produced
- * the CTA copy and a silent card; they now fire on `status === 'failed'` too.
- * The other is structural and remains — the CTA reads the hook's SHARED
- * `result` (the latest reply from any job) while each card reads its OWN
- * snapshot, so with several jobs in flight the CTA can be describing a
- * different failure from the card next to it. Same rule, different inputs.
+ * 🔴 THE RESIDUAL, NAMED RATHER THAN HIDDEN. Two earlier ones are now closed:
+ * both card write sites used to be gated on `snap.error` being truthy (a priced
+ * `failed` with no server text produced the CTA copy and a silent card — they
+ * now fire on `status === 'failed'` too), and the CTA used to RE-DERIVE this on
+ * every render from the hook's shared `result` while the card had frozen its
+ * copy at write time, so a balance that moved in between made them disagree
+ * about the same snapshot. What remains is the multi-job case: the CTA holds
+ * ONE verdict — whichever job or estimate settled last — while each card holds
+ * its own, so with several jobs in flight the CTA can be describing a different
+ * failure from the card beside it. Same rule, same instant, different jobs.
  *
  * 🔴 NO PROSE. Three earlier attempts classified by substring —
  * `insufficient|not enough|budget|balance`, then `rate|too many|velocity|limit`
@@ -2481,10 +2605,33 @@ type SpendContext = {
  * onto the hook's shared `result`, which is what the CTA reads. Offering to
  * sell Buzz for any of those is selling a fix that cannot work.
  *
- * The discriminator is structural and it is arithmetic: a refusal is a
- * shortfall only when the viewer's spendable balance does NOT cover the price
- * the server quoted. If the balance already covers it, affordability is not
- * what went wrong, whatever else did.
+ * 🔴 AND THE ARITHMETIC ALONE IS NOT ENOUGH EITHER — that was round 6's F1, and
+ * it is why the FIRST clause below is about the job's LIFECYCLE, not its money.
+ * A refusal is a job that NEVER STARTED. A submit that replies with any
+ * non-`failed` status was accepted and FUNDED: the SDK's server-side comment is
+ * "A resolved submit is money-COMMITTED (the reservation is kept regardless of
+ * snapshot status)… we do NOT refund on a non-throwing failed snapshot". So
+ * every later `failed` such a job reports — every one that reaches this
+ * function through the poll loop — is an EXECUTION failure, and it can never be
+ * an affordability refusal no matter what the price is or what the balance
+ * says. The host's affordability and cap gates all run BEFORE the workflow is
+ * forwarded, so there is no path by which an accepted job is later refused for
+ * money.
+ *
+ * That clause is what makes the balance's TIMING stop mattering. Reading a
+ * balance against a charged-and-then-failed job was comparing the price of a
+ * generation to the wallet it had just emptied — arithmetic that says "short"
+ * for every viewer whose balance was under twice the price, and offers to sell
+ * them Buzz for a moderation rejection they have already paid for.
+ *
+ * Note what it does NOT scope out, and why it is not round 3's
+ * `phase === 'submit'` returning: a refused ESTIMATE never started either, so
+ * it stays eligible. The discriminator is acceptance, not phase.
+ *
+ * The remaining clauses are arithmetic: a refusal is a shortfall only when the
+ * viewer's spendable balance does NOT cover the price the server quoted. If the
+ * balance already covers it, affordability is not what went wrong, whatever
+ * else did.
  *
  * Second structural clause, same logic one level up: the host gates
  * `cost_estimate <= token.buzzBudget` before forwarding to the orchestrator, so
@@ -2499,8 +2646,13 @@ type SpendContext = {
  */
 function isSpendLimitRefusal(
   snap: { status?: string; cost?: { total?: number | null } | null } | null | undefined,
-  spend: SpendContext
+  spend: SpendContext,
+  lifecycle: JobLifecycle
 ): boolean {
+  // 🔴 FIRST, AND STRUCTURAL: an accepted workflow was funded. Whatever killed
+  // it later, money was not the obstacle — the money was already taken. See the
+  // 🔴 above; this is the clause that closes round 6's F1.
+  if (lifecycle.accepted) return false;
   if (snap?.status !== 'failed') return false;
   const price = snap.cost?.total;
   // Unpriced failures are not refusals at all — blocks-react rejects those
@@ -2523,7 +2675,7 @@ function isSpendLimitRefusal(
 function logAndMapFailure(
   snap: { status?: string; error?: string | null; cost?: { total?: number | null } | null },
   phase: 'submit' | 'poll',
-  spend: SpendContext,
+  refused: boolean,
   ctx: Record<string, unknown>
 ): string {
   // eslint-disable-next-line no-console
@@ -2534,7 +2686,7 @@ function logAndMapFailure(
     // Developer channel only. Never rendered — see viewerFailureText.
     serverReason: snap.error,
   });
-  return viewerFailureText(snap, spend);
+  return viewerFailureText(refused);
 }
 
 /**
@@ -2544,20 +2696,22 @@ function logAndMapFailure(
  * as carrying raw Prisma/pg column and constraint names — so it is logged by
  * the caller and never rendered.
  *
- * It takes NO `phase`. A phase-scoped card next to a phase-blind CTA (the CTA
- * is computed from the hook's shared `result`, which carries no phase) is how
- * round 3 put "failed" and "buy Buzz" on the same screen. One rule.
+ * 🔴 IT NO LONGER CLASSIFIES ANYTHING — it takes the ANSWER. It used to call
+ * `isSpendLimitRefusal` itself, which meant the card and the CTA each ran the
+ * rule over inputs read at different moments; identical rule, different
+ * instants, visibly different screens (round 6's F2). The caller classifies
+ * once and both consumers render that one boolean.
+ *
+ * It takes NO `phase` either. A phase-scoped card next to a phase-blind CTA is
+ * how round 3 put "failed" and "buy Buzz" on the same screen. One rule.
  *
  * Everything that is not a balance shortfall gets one neutral sentence. The
  * resolved snapshot carries no structured refusal code, and `snap.error` is the
  * server's own unsanitised text, so there is nothing else honest to say —
  * guessing at that free text is what three rounds were spent undoing.
  */
-function viewerFailureText(
-  snap: { status?: string; cost?: { total?: number | null } | null },
-  spend: SpendContext
-): string {
-  if (isSpendLimitRefusal(snap, spend)) {
+function viewerFailureText(refused: boolean): string {
+  if (refused) {
     return 'This generation hit a Buzz spend limit.';
   }
   return 'This generation failed.';

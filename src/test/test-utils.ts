@@ -12,7 +12,7 @@
  * on. If the App grows to use a hook not represented here, add it here
  * rather than fighting the harness.
  */
-import type { ReactElement } from 'react';
+import { useEffect, useState, type ReactElement } from 'react';
 import { expect, vi } from 'vitest';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -229,10 +229,74 @@ export function setMockWorkflow(patch: Partial<WorkflowState>): void {
  */
 export function setMockBuzzBalance(patch: Partial<BalanceState>): void {
   state.buzzBalance = { ...state.buzzBalance, ...patch };
+  // Notify any mounted `useBuzzBalance()` so a change made MID-TEST re-renders
+  // the App. Before this the mock read `state` at render time only, so nothing
+  // could move the balance after mount — see `setMockBuzzBalanceRefetch`.
+  notifyBalance();
+}
+
+/**
+ * 🔴 THE HARNESS GAP THIS CLOSES (round 6, F3). `refetchBuzzBalance` used to be
+ * a bare `vi.fn()` and the balance was a value fixed before mount, so NO test
+ * could express the one thing the money path actually does: settle a workflow,
+ * re-read the balance, and render against the NEW figure. Two whole defect
+ * families lived in that blind spot (a post-debit balance re-classifying the
+ * failure that caused the debit; a refetch's `loading`/`error` blanking a
+ * genuine shortfall's top-up CTA), and two guards written in round 5 survived
+ * mutation because nothing here could tell a refetch happened.
+ *
+ * The behaviours mirror the REAL `useBuzzBalance` exactly (see
+ * `blocks-react/dist/hooks/useBuzzBalance.js`):
+ *   - `refetch()` sets `loading: true` and clears `error` SYNCHRONOUSLY;
+ *   - on success it replaces `balance` and clears `loading`;
+ *   - on failure it sets `error` and clears `loading`, LEAVING the previous
+ *     `balance` in place — the hook never nulls a value it once fetched.
+ *
+ * `'inert'` is the default (a bare spy, nothing moves) so existing tests are
+ * unaffected. The async settle lands on a microtask: flush it with
+ * `await act(async () => {})` or a `waitFor`.
+ */
+export type BuzzRefetchBehaviour =
+  | { kind: 'inert' }
+  | { kind: 'resolves'; balance: { blue: number; green: number; yellow: number } }
+  | { kind: 'fails'; error?: Error }
+  | { kind: 'never' };
+
+export function setMockBuzzBalanceRefetch(behaviour: BuzzRefetchBehaviour): void {
+  state.spies.refetchBuzzBalance.mockImplementation(() => {
+    if (behaviour.kind === 'inert') return;
+    // Synchronous half — exactly what the real hook does first.
+    state.buzzBalance = { ...state.buzzBalance, loading: true, error: null };
+    notifyBalance();
+    if (behaviour.kind === 'never') return;
+    void Promise.resolve().then(() => {
+      if (behaviour.kind === 'resolves') {
+        state.buzzBalance = { balance: behaviour.balance, loading: false, error: null };
+      } else {
+        // Balance RETAINED — the real hook only sets `error` and `loading`.
+        state.buzzBalance = {
+          ...state.buzzBalance,
+          loading: false,
+          error: behaviour.error ?? new Error('host refused'),
+        };
+      }
+      notifyBalance();
+    });
+  });
 }
 
 export function getMockSpies(): MockState['spies'] {
   return state.spies;
+}
+
+/**
+ * Read back what `useBuzzBalance()` currently reports. Exists so a test can
+ * PROVE a `refetch()` actually landed (or is still in flight) instead of
+ * asserting an outcome that would look identical if the refetch never fired —
+ * the reassuring-zero shape that let round 5's refetch guards survive mutation.
+ */
+export function getMockBuzzBalance(): BalanceState {
+  return state.buzzBalance;
 }
 
 /* ------------------------------------------------------------------ *
@@ -339,7 +403,27 @@ function useBuzzWorkflow() {
   };
 }
 
+/**
+ * Subscribers so a balance change made from OUTSIDE React (a `refetch()`
+ * settling, a `setMockBuzzBalance` mid-test) actually re-renders the App. The
+ * real hook holds this state internally; the mock reads a module-level record,
+ * which React has no way to observe without this.
+ */
+const balanceListeners = new Set<() => void>();
+
+function notifyBalance(): void {
+  balanceListeners.forEach((l) => l());
+}
+
 function useBuzzBalance() {
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const listener = () => bump((n) => n + 1);
+    balanceListeners.add(listener);
+    return () => {
+      balanceListeners.delete(listener);
+    };
+  }, []);
   return {
     balance: state.buzzBalance.balance,
     loading: state.buzzBalance.loading,
