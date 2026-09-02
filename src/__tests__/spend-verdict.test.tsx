@@ -26,7 +26,7 @@
  * was unreachable and a fully green 176-test suite said nothing about it.
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
@@ -37,6 +37,7 @@ import {
   resetBlocksReactMock,
   setMockBuzzBalance,
   setMockBuzzBalanceRefetch,
+  setMockSettings,
 } from '../test/test-utils';
 
 vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
@@ -694,28 +695,35 @@ describe('R8 F1 — a transport-level ESTIMATE rejection must not wipe a live ve
   });
 });
 
-describe('R8 F2 — the fourth classification site writes BOTH consumers from one call', () => {
-  it('🔴 a PRICED thrown snapshot puts the same sentence on the card and the CTA', async () => {
-    // ⚠️ SEAM GUARD OVER A FIXTURE TODAY'S SDK CANNOT PRODUCE — say so plainly.
-    // `submit()` throws only under `status === 'failed' && typeof cost?.total
-    // !== 'number'`, so every snapshot that can really reach the catch is
-    // UNPRICED and the predicate answers `false` for all of them. This test
-    // fabricates a PRICED one, so it pins the app's INTERNAL coupling, not a
-    // defect a viewer can hit today.
+describe('R8 F2 (INVERTED IN ROUND 9) — a thrown submit never sells Buzz for money that may already be gone', () => {
+  it('🔴 a PRICED workflow-failed throw gets NO top-up CTA — the SDK says Buzz may already be spent', async () => {
+    // 🔴 THIS TEST USED TO ASSERT THE OPPOSITE, AND THAT WAS ROUND 6's F1 INSIDE
+    // THE GUARD WRITTEN TO PREVENT ITS COUSIN. Round 8 fabricated this same
+    // priced `workflow-failed` throw and asserted the viewer MUST get "Top up"
+    // + the spend-limit copy ×2. The SDK's docstring for that code forbids it in
+    // as many words: "🔴 DO NOT TELL THE VIEWER NOTHING WAS CHARGED… treats *any
+    // resolved* submit as money-COMMITTED (the reservation is kept regardless of
+    // snapshot status)… So Buzz may already be spent for this call." A thrown
+    // `workflow-failed` scored `accepted: false` — the lifecycle clause keys on
+    // `submit()` REPLYING non-`failed`, and a throw is not a reply — so the
+    // predicate fell through to the balance arithmetic and offered to sell Buzz
+    // for a charge the server may already have taken.
     //
-    // It is still regression coverage, and it is RED at 8f05293: round 7 added
-    // this fourth classification site and wired the verdict to the predicate
-    // while leaving the card copy a literal branched on `err.code`. On this
-    // fixture the base therefore renders "Top up" + "This generation hit a Buzz
-    // spend limit." beside a card reading "This generation failed to start." —
-    // the two-consumers-disagreeing shape the one predicate exists to prevent,
-    // reintroduced by the commit that was closing it. The comment above
-    // `spendLimited` asserted the opposite for a whole round.
+    // ⚠️ STILL A SEAM GUARD OVER A FIXTURE TODAY'S SDK CANNOT PRODUCE, on TWO
+    // independent axes: `submit()` throws only under `status === 'failed' &&
+    // typeof cost?.total !== 'number'`, so a thrown snapshot is never priced;
+    // and the code is chosen by `snapshot.workflowId === 'failed' ? 'exception'
+    // : 'workflow-failed'`, so round 8's `workflowId: 'failed'` would have been
+    // an `'exception'`, not the code it labelled. The id below is a plausible
+    // server-built one, which is what actually reaches this arm.
+    //
+    // It is REGRESSION coverage, not an invariant guard: at 5c9c738 this fixture
+    // renders "Top up" and the money copy, and the assertions below fail.
     const spies = getMockSpies();
     setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
     spies.submit.mockRejectedValue(
       new WorkflowSubmitError(
-        { workflowId: 'failed', status: 'failed', cost: { total: PRICE } } as never,
+        { workflowId: 'wf_srv_8814', status: 'failed', cost: { total: PRICE } } as never,
         'workflow-failed'
       )
     );
@@ -727,25 +735,28 @@ describe('R8 F2 — the fourth classification site writes BOTH consumers from on
     freezeEstimate();
     await clickGenerate();
 
-    // POSITIVE CONTROL: we are in the catch, and the predicate said "refusal".
+    // POSITIVE CONTROL: we are in the catch at all, and the card really did
+    // settle. Without it every negative assertion below passes just as happily
+    // if the click never submitted.
     await waitFor(() => expect(spies.submit).toHaveBeenCalled());
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+      expect(screen.getByText('This generation failed to start.')).toBeInTheDocument()
     );
 
-    // ONE sentence, in BOTH places. At the base the card holds the `err.code`
-    // literal instead and this is 1.
+    // The money surface, absent — nowhere, in either consumer.
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
+    expect(spies.openPurchaseModal).not.toHaveBeenCalled();
+    // ...and Generate is back, because a viewer whose money may already be
+    // committed is not blocked behind a purchase they do not need.
     expect(
-      screen.getAllByText('This generation hit a Buzz spend limit.')
-    ).toHaveLength(2);
-    // ...and specifically NOT the code-branched copy, which is the money answer
-    // being overridden by a literal.
-    expect(screen.queryByText('This generation failed to start.')).toBeNull();
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
   });
 
   // 🔴 NO SECOND TEST HERE, AND THAT IS A MEASUREMENT. The other half of this
-  // fix — that BELOW the money answer `workflow-failed` and `exception` still
-  // carry their own sentences — is already pinned by `queue.test.tsx > a THROWN
+  // fix — that `workflow-failed` and `exception` still carry their own
+  // sentences — is already pinned by `queue.test.tsx > a THROWN
   // workflow-failed submit says something different from a plain exception`.
   // A guard was written for it and then deleted: collapsing the two code
   // branches into one sentence killed the new guard AND that existing test with
@@ -817,5 +828,270 @@ describe('R8 F3 — a submit that throws is a terminal transition, so it re-read
     expect(
       screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
     ).toBeNull();
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ *  ROUND 9 — the verdict is an answer ABOUT something, and the subject
+ *  can change under it.
+ * ------------------------------------------------------------------ */
+
+describe('R9 F1 — a verdict about a 42 quote does not survive the viewer making it a 3 quote', () => {
+  it('🔴 lowering a cost-bearing param retires the stale refusal, even when the re-quote never lands', async () => {
+    // 🔴 ROUND 8's OWN DEFECT, IN THE DIRECTION IT DID NOT NAME. Round 8 made a
+    // snapshot-less estimate rejection stop CLEARING the verdict — correct for a
+    // transport error, which decides nothing — and traded the wipe for a
+    // LOCKOUT, because the verdict was a bare boolean that outlived the quote it
+    // was computed for.
+    //
+    // The measured screen, in the numbers it was reported in. The viewer holds
+    // 5, the mount quote is 42, and a genuine priced refusal stores the verdict:
+    // "Top up · 500", the spend-limit copy in both places, and NO Generate
+    // button — the CTA replaces it. The viewer then lowers Steps so the real
+    // price would be 3. The debounced re-quote fires, the orchestrator's whatIf
+    // is slow, `sendTypedRequest` hits `WORKFLOW_REQUEST_TIMEOUT_MS`, and the
+    // SDK's `estimate` catch RETHROWS the raw error — so a plain `Error` lands,
+    // there is no snapshot, and round 8's guard skips the write. At 5c9c738 the
+    // viewer is left holding a Top-up CTA and no Generate button for a
+    // configuration they can afford. At 8f05293 the same rejection cleared the
+    // verdict and Generate came back, and `submit()` is a different message type
+    // so it would have succeeded — the regression is strictly newer than the
+    // defect round 8 fixed.
+    //
+    // 🔴 WHY THE OTHER CANDIDATE FIX IS NOT ON THIS PATH: a re-quote after a
+    // submit THROW (`runEstimateNow(true)` sits after the `await` and is never
+    // reached on the throw path) cannot touch this. There is no throw here —
+    // `submit()` RESOLVES a priced refusal, so line ~1136 already re-quotes on
+    // exactly this path, and the lockout happens BECAUSE that re-quote rejects
+    // at the transport. Adding the same call to the catch adds a retry of the
+    // call that is already failing.
+    setMockSettings({ show_advanced: true });
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.estimate.mockResolvedValue({
+      workflowId: 'wf_quote',
+      status: 'pending',
+      cost: { total: PRICE },
+    } as never);
+    spies.submit.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: PRICE },
+    } as never);
+
+    await renderApp(<App />);
+    // The mount quote really is 42 — assert it, so "the price the verdict is
+    // about" is a measurement rather than an assumption.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Generate Image · 42/ })
+      ).toBeInTheDocument()
+    );
+
+    // Freeze the post-submit re-quote: a SUCCESSFUL estimate clears the verdict
+    // on purpose, so leaving it live would make the refused state a race.
+    freezeEstimate();
+    await clickGenerate();
+
+    // A genuine, correct refusal — never queued, priced 42, and 5 really is
+    // short. This is the state the fix must NOT weaken.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+    expect(
+      screen.getAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(2);
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
+
+    // The viewer lowers Steps — and the bridge is down, so the debounced
+    // re-quote rejects at the TRANSPORT with a plain `Error`.
+    spies.estimate.mockRejectedValue(new Error('bridge request timed out'));
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
+    fireEvent.change(screen.getByLabelText('Steps'), { target: { value: '5' } });
+
+    // POSITIVE CONTROL: the re-quote really fired and really rejected. Without
+    // it every assertion below passes just as happily if the debounce never ran.
+    await waitFor(
+      () =>
+        expect(
+          screen.getByText(
+            "Couldn't estimate cost: the estimate service is unavailable — try again in a moment."
+          )
+        ).toBeInTheDocument(),
+      { timeout: 1500 }
+    );
+    // 🔴 PIN THE PROPERTY, not just the outcome: what came out of `estimate()`
+    // is NOT a `WorkflowEstimateError`, so it carries no snapshot and round 8's
+    // guard correctly declined to write. The verdict is retired by the SUBJECT
+    // changing, not by the rejection.
+    const lastEstimate = spies.estimate.mock.results.at(-1)?.value;
+    await expect(lastEstimate).rejects.toBeInstanceOf(Error);
+    await expect(lastEstimate).rejects.not.toBeInstanceOf(WorkflowEstimateError);
+
+    // The claim. The stored answer was about the 42 quote; this is not that
+    // configuration, so it does not apply and Generate is available again.
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    // 🔴 EXACTLY ONE, NOT ZERO. The CTA's copy goes with the CTA; the JOB CARD
+    // keeps its sentence, because that card is a record of a decision that was
+    // correct when it was made and is not re-decided by anything here.
+    expect(
+      screen.queryAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(1);
+    expect(spies.openPurchaseModal).not.toHaveBeenCalled();
+  });
+
+  it('a re-quote for the SAME params leaves a live verdict standing (round 8, not weakened)', async () => {
+    // ⚠️ INVARIANT GUARD, NOT REGRESSION COVERAGE — green at 5c9c738 too, where
+    // round 8's fix already produced this screen. It is here because the F1 fix
+    // is a rule about WHAT the verdict is about, and the cheapest way to get
+    // that rule wrong is to make it fire on any re-quote rather than on a
+    // subject change. This is the control arm of the test above: same setup,
+    // same transport rejection, NO param edit — so the verdict must stand.
+    setMockSettings({ show_advanced: true });
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.estimate.mockResolvedValue({
+      workflowId: 'wf_quote',
+      status: 'pending',
+      cost: { total: PRICE },
+    } as never);
+    spies.submit.mockResolvedValue({
+      workflowId: 'failed',
+      status: 'failed',
+      error: 'spend cap exceeded',
+      cost: { total: PRICE },
+    } as never);
+
+    await renderApp(<App />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Generate Image · 42/ })
+      ).toBeInTheDocument()
+    );
+    freezeEstimate();
+    await clickGenerate();
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument()
+    );
+
+    // A NON-cost-bearing edit — the prompt does not price and does not re-quote
+    // — plus a transport rejection driven by the identity effect's own re-run.
+    spies.estimate.mockRejectedValue(new Error('bridge request timed out'));
+    await userEvent.click(screen.getByLabelText('Prompt (optional)'));
+    await userEvent.keyboard('a cat');
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
+    // Toggling the seed is a price change the block deliberately does NOT treat
+    // as a subject change: it only ever moves the price UP, so it can never make
+    // a refused configuration affordable.
+    await userEvent.click(screen.getByRole('button', { name: /🎲 random/ }));
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "Couldn't estimate cost: the estimate service is unavailable — try again in a moment."
+        )
+      ).toBeInTheDocument()
+    );
+    // Still refused, in both places, with no Generate button.
+    expect(screen.getByRole('button', { name: /Top up/ })).toBeInTheDocument();
+    expect(
+      screen.getAllByText('This generation hit a Buzz spend limit.')
+    ).toHaveLength(2);
+    expect(
+      screen.queryByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeNull();
+  });
+});
+
+describe('R9 F1b — the subject is stamped at KICKOFF, so a slow quote cannot claim a newer configuration', () => {
+  it('🔴 a refusal that settles after the params moved does not attach itself to the new params', async () => {
+    // 🔴 THIS TEST EXISTS BECAUSE A MUTATION SURVIVED. Stamping the estimate
+    // verdict from `spendKeyRef.current` at SETTLE time instead of from the key
+    // captured at KICKOFF passed all 194 tests — the choice was prose, not a
+    // guard. This is its killing case, and it is the F1 defect one indirection
+    // over: the answer would be about the quote that was SENT while the key it
+    // carried named the configuration on screen when it came BACK.
+    //
+    // The window is real, not contrived. The debounce is 400ms, so a second
+    // edit does not bump `estimateInFlightRef` until its own timer fires; an
+    // in-flight quote that settles inside that gap is still "the latest" and
+    // does write. Here the viewer quotes at Steps=28 (42, unaffordable), edits
+    // to Steps=5 while it is in flight, and the 28-quote's refusal lands.
+    //
+    // (28, not 30: the showcase's own steps ARE 30, so `fireEvent.change` to
+    // that value sets no new value and React fires no `change` — the edit, the
+    // debounce and the quote would all be silently skipped, and every assertion
+    // below would then pass with no quote in flight at all.)
+    setMockSettings({ show_advanced: true });
+    const spies = getMockSpies();
+    setMockBuzzBalance({ balance: { blue: 0, green: 0, yellow: 5 } }); // 5 < 42
+    spies.estimate.mockResolvedValue({
+      workflowId: 'wf_quote',
+      status: 'pending',
+      cost: { total: PRICE },
+    } as never);
+
+    await renderApp(<App />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: /Generate Image · 42/ })
+      ).toBeInTheDocument()
+    );
+    await userEvent.click(screen.getByRole('button', { name: /Advanced settings/i }));
+
+    // The next quote hangs, so we can settle it by hand AFTER the params move.
+    let rejectQuote: (e: unknown) => void = () => {};
+    const quotePending = new Promise((_resolve, reject) => {
+      rejectQuote = reject;
+    });
+    spies.estimate.mockImplementation(() => quotePending as never);
+    const callsBefore = spies.estimate.mock.calls.length;
+
+    fireEvent.change(screen.getByLabelText('Steps'), { target: { value: '28' } });
+    // The 28-quote really did leave (the debounce fired) — assert it, so what
+    // follows is a settle-after-edit rather than a quote that never started.
+    await waitFor(() => expect(spies.estimate.mock.calls.length).toBe(callsBefore + 1), {
+      timeout: 1500,
+    });
+
+    // The viewer edits again. Synchronous, and inside the 400ms before this
+    // edit's own quote fires — so the hung 30-quote is still the latest and its
+    // settle is NOT dropped by the race guard.
+    fireEvent.change(screen.getByLabelText('Steps'), { target: { value: '5' } });
+    await act(async () => {
+      rejectQuote(
+        new WorkflowEstimateError(
+          { workflowId: 'wf_est30', status: 'failed', cost: { total: PRICE } } as never,
+          'failed'
+        )
+      );
+      await quotePending.catch(() => {});
+    });
+
+    // POSITIVE CONTROL, and it is the discriminating one: the catch ran with
+    // `myId` still current. Had the race guard dropped this settle, nothing
+    // would have written `estimateError` either, and every assertion below
+    // would pass for the wrong reason.
+    await waitFor(() =>
+      expect(
+        screen.getByText(
+          "Couldn't estimate cost: the estimate service is unavailable — try again in a moment."
+        )
+      ).toBeInTheDocument()
+    );
+
+    // The claim: that refusal priced Steps=28. The screen is Steps=5.
+    expect(screen.queryByRole('button', { name: /Top up/ })).toBeNull();
+    expect(screen.queryByText(/Buzz spend limit/)).toBeNull();
+    expect(
+      screen.getByRole('button', { name: /Generate Image|Re-generate Image/ })
+    ).toBeInTheDocument();
+    expect(spies.openPurchaseModal).not.toHaveBeenCalled();
   });
 });
