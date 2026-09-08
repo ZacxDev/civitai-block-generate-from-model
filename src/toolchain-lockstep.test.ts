@@ -87,16 +87,55 @@ function stepBlock(workflow: string, actionPrefix: string): string[] {
 }
 
 /**
- * The package manager CI installs, derived from the workflow rather than
- * assumed: a `pnpm/action-setup` step means pnpm, and its absence means the
- * plain `npm` that ships with `actions/setup-node`. Throws if the workflow is
- * empty, so "no evidence either way" can never be compared to anything.
+ * The package manager CI actually INVOKES, read out of the workflow's commands.
+ *
+ * Not the presence of a `pnpm/action-setup` step: that says only what is
+ * INSTALLED on the runner, and a workflow can install pnpm and then run npm.
+ * Measured in this repo, not reasoned about — with the setup step left exactly
+ * in place and the four `- run:` lines switched to their npm equivalents, the
+ * step-presence version of this check answered "pnpm" and all 5 assertions in
+ * this file stayed green, for a CI job that never touches pnpm. That is the
+ * precise split the assertion below is named for, reported as agreement.
+ *
+ * Comments are stripped first so a line of prose mentioning `npm ci` is not
+ * mistaken for a step. Zero managers throws, as before — "no evidence either
+ * way" can never be compared to anything. Two or more throws as well: the
+ * platform builder runs exactly one command, so a set is not something it can
+ * match, and picking a winner would be an invention rather than a reading.
+ *
+ * Scope: `.github/workflows/ci.yml` only. The `docker` job in it builds the
+ * image through `docker/build-push-action`, so the `npm install -g pnpm@11` in
+ * the Dockerfile is invisible here — deliberately, since that npm invocation
+ * only bootstraps pnpm and is not how this repo is built.
  */
-function ciPackageManager(workflow: string): 'pnpm' | 'npm' {
-  if (workflow.trim() === '') {
-    throw new Error('.github/workflows/ci.yml is empty — no CI package manager to compare against');
+function ciPackageManager(workflow: string): string {
+  const active = workflow.replace(/(^|\s)#.*$/gm, '$1');
+
+  const invoked = [
+    ...new Set(
+      [...active.matchAll(/\b(npm|pnpm|yarn|bun)\s+(?:install|ci|run|test|build|exec)\b/g)].map(
+        (m) => m[1],
+      ),
+    ),
+  ];
+
+  // Destructured rather than indexed because `tsconfig.json` sets
+  // `noUncheckedIndexedAccess`: the `undefined` arm IS the empty case, so the
+  // narrowing and the guard are the same statement.
+  const [first, ...rest] = invoked;
+  if (first === undefined) {
+    throw new Error(
+      'ci.yml invokes no npm/pnpm/yarn/bun command — there is no CI package manager to compare against',
+    );
   }
-  return /^\s*-\s+uses:\s*pnpm\/action-setup@/m.test(workflow) ? 'pnpm' : 'npm';
+  if (rest.length > 0) {
+    throw new Error(
+      `ci.yml invokes more than one package manager (${[first, ...rest].sort().join(', ')}) — ` +
+        'the platform builder runs exactly one, so it cannot match all of them',
+    );
+  }
+
+  return first;
 }
 
 /** Every `key: value` at any depth inside a step block, as pairs. */
@@ -173,9 +212,12 @@ describe('toolchain lockstep', () => {
     // (an npm `buildCommand` beside a pnpm-only lockfile) and it took
     // `civitai app validate` to catch it, long after CI had gone green.
     //
-    // BOTH sides are derived. Hardcoding `'pnpm'` on the CI side would make
-    // this assertion's name a lie: switching CI to npm would leave it green
-    // while the two disagreed, which is the precise failure it is named for.
+    // BOTH sides are derived, and CI's side is derived from the commands the
+    // workflow RUNS — not from the toolchain it installs. Hardcoding `'pnpm'`
+    // would make this assertion's name a lie; so did reading the presence of a
+    // `pnpm/action-setup` step, because a workflow can install pnpm and then
+    // invoke npm, and that version stayed green through exactly the switch this
+    // assertion is named for.
     const ci = ciPackageManager(workflow);
 
     const manifest = JSON.parse(repoFile('../block.manifest.json')) as {
