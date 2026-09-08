@@ -66,17 +66,24 @@ git clone https://github.com/ZacxDev/civitai-block-generate-from-model.git
 cd civitai-block-generate-from-model
 cp .env.example .env
 
-npm install
-npm run dev:harness     # http://localhost:5173 — local dev with simulated host
+# The toolchain (node + pnpm) is pinned by the flake — `direnv allow`, or:
+nix develop
+
+pnpm install --frozen-lockfile
+pnpm run dev:harness     # http://localhost:5173 — local dev with simulated host
 ```
+
+Without nix: node major per [`.nvmrc`](./.nvmrc) and pnpm 11 (see [`flake.nix`](./flake.nix)).
 
 The dev harness simulates BLOCK_INIT, intercepts outbound `postMessage`s, and echoes token refreshes — so you can iterate on the UI without civitai.com actually embedding you.
 
 ## Build & deploy
 
 ```bash
-npm run build              # → ./dist/
-npm run docker:build       # → ghcr.io/zacxdev/civitai-block-generate-from-model:latest
+pnpm test                   # 24 vitest files
+pnpm run typecheck          # tsc --noEmit
+pnpm build                  # → ./dist/
+pnpm run docker:build       # → ghcr.io/zacxdev/civitai-block-generate-from-model:latest
 ```
 
 The Docker image runs nginx serving `/generate-from-model/` (the path declared in `block.manifest.json`'s `iframe.src`). For the hackathon, the image is pulled by the `civitai-blocks-hackathon` namespace in `datapacket-talos`.

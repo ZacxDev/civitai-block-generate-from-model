@@ -3,3 +3,9 @@ dist
 .env
 .env.local
 *.log
+
+# nix / direnv. `flake.nix` + `flake.lock` ARE tracked; these are the artifacts
+# entering the shell leaves behind.
+.direnv/
+result
+result-*

@@ -1,6 +1,6 @@
 {
   "name": "civitai-block-generate-from-model",
-  "version": "0.1.0",
+  "version": "0.2.23",
   "private": true,
   "description": "Civitai App Block \u2014 'Generate from this model'. One-tap generation widget that embeds on the model.sidebar_top slot.",
   "type": "module",
