@@ -3,18 +3,32 @@
 # FQDN registry refs per Tekton buildah short-name-mode (skill gotcha #19).
 
 # Stage 1: build the Vite bundle
-FROM docker.io/library/node:22-alpine AS builder
+#
+# ⚠️ THIS TAG IS A THIRD STATEMENT OF THE NODE MAJOR. `.nvmrc` is the authority
+# that flake.nix and `.github/workflows/ci.yml` both read, and
+# `src/toolchain-lockstep.test.ts` keeps THOSE two honest — it does not see
+# this line, because a Dockerfile FROM tag cannot read a file at build time.
+# Bump it with `.nvmrc`, by hand.
+FROM docker.io/library/node:24-alpine AS builder
 WORKDIR /app
 
-# Install deps with package-lock for determinism
-COPY package.json package-lock.json* ./
-RUN npm ci || npm install
+# pnpm is installed explicitly rather than via corepack: this repo deliberately
+# declares no `packageManager` field in package.json (see flake.nix), and
+# corepack keys off exactly that field. The major matches flake.nix's
+# `pnpmMajor` and ci.yml's `pnpm/action-setup` version.
+RUN npm install -g pnpm@11
+
+# Install deps from the lockfile for determinism. `pnpm-workspace.yaml` must be
+# present at install time: it declares the single-package root AND the
+# `allowBuilds` approval without which pnpm 11 exits `ERR_PNPM_IGNORED_BUILDS`.
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+RUN pnpm install --frozen-lockfile
 
 # Build
 COPY tsconfig.json vite.config.ts index.html .env.production ./
 COPY src/ ./src/
 COPY block.manifest.json civitai.app.json ./
-RUN npm run build
+RUN pnpm run build
 
 # Stage 2: serve via nginx-unprivileged. nginx:1.27-alpine ships /var/cache/
 # nginx + /var/log/nginx + /var/run/ owned by root, so a non-root USER hits

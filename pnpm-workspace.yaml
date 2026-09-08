@@ -1,0 +1,21 @@
+# Single-package repo: declare the root explicitly. pnpm and `actions/setup-node`'s
+# `cache: pnpm` both error with "packages field missing or empty" without it.
+packages:
+  - '.'
+
+# pnpm does not run a dependency's install scripts unless it is approved here,
+# and pnpm 11 makes an unapproved script a hard `ERR_PNPM_IGNORED_BUILDS`
+# failure rather than a warning — so `pnpm install` exits 1 without this block.
+# (pnpm 11 spells it `allowBuilds:`; pnpm 10 spelled it `onlyBuiltDependencies:`
+# and only warned. The toolchain here is pinned to 11 — see flake.nix.)
+#
+#   esbuild — its `postinstall` resolves and stamps the platform-native binary
+#     that `vite build` shells out to. Modern esbuild also ships that binary as
+#     an optionalDependency, so the build happens to succeed even when the
+#     script is skipped (npm's own `npm ci` skipped it here and still built);
+#     the entry exists so the INSTALL succeeds, and so the sanctioned path runs.
+#
+# This file ships in the submitted bundle. `.github/` does not — so a build that
+# only ever ran in CI could never have caught a missing entry here.
+allowBuilds:
+  esbuild: true
