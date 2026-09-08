@@ -13,8 +13,10 @@ generic `civitai-block-starter` guide that `civitai app init` clones — it was
 never rewritten for this app and had gone stale in ways that actively misled:
 it described the *starter's* file layout (no `src/__tests__/`, no
 `src/test/test-utils.ts`), pinned versions this repo has long since moved past,
-and stated "the starter intentionally ships without an e2e suite" while this
-repo has 24 vitest files and 198 tests. The direction of the include is also
+and stated "the starter intentionally ships without an e2e suite" while
+`src/__tests__/` here is the largest thing in the repo after `App.tsx` itself.
+(No test count is quoted on purpose — a number in prose rots on the next test
+anyone adds, and a stale one is how this file got here.) The include is also
 flipped: `CLAUDE.md` used to be a one-line `@AGENTS.md`, which meant the only
 file a Claude Code session loads by default was an indirection to prose about a
 different codebase. The upstream starter text is still available in its own

@@ -132,36 +132,26 @@ charged correctly — that needs a human in a real mod-gated host. Say so plainl
 rather than reporting a green suite as if it covered the money path.
 
 New guards should pin a *relationship* that cannot rot on a routine bump, and
-be watched failing before they are trusted. `src/toolchain-lockstep.test.ts` is
-the pattern to copy: it explains, in the file, the incident it exists to
-prevent, and every extractor throws rather than passing when the thing it
-inspects is deleted.
+be watched failing before they are trusted. `src/toolchain-lockstep.test.ts`
+and `src/version-lockstep.test.ts` are the pattern to copy: both explain, in
+the file, the incident they exist to prevent, and both throw rather than pass
+when the thing they inspect is missing.
 
 ## Release protocol
 
-- 🔴 **`block.manifest.json` (`0.2.22`) and `package.json` (`0.1.0`) currently
-  DISAGREE.** The manifest version is what the platform submits and what
-  `civitai app submit` compares against the highest approved version;
-  `package.json`'s is what the build and toolchain read. Sibling repos carry a
-  `src/version-lockstep.test.ts` asserting the two move together — it is
-  deliberately **absent here**, because adding it would pin an already-broken
-  state red on day one. Reconcile the two versions (a human call: picking one
-  changes what the store sees), then port that guard.
-- 🔴 **`block.manifest.json` declares no `buildCommand`, and with a pnpm
-  lockfile that is a BROKEN platform build.** `civitai app validate` (CLI
-  0.1.101) fails the repo outright: with no `buildCommand` the platform falls
-  back to the legacy default `npm run build`, which runs `npm ci` and installs
-  strictly from a `package-lock.json` this repo no longer commits. Measured fix,
-  verified to restore validation to clean — add both keys, the schema requires
-  `outputDir` alongside `buildCommand`:
-
-  ```json
-  "buildCommand": "pnpm run build",
-  "outputDir": "dist",
-  ```
-
-  It is deliberately **not** in the tree: that line is what the platform runs to
-  build the live app, and choosing it is a human call, not an agent's.
+- **`block.manifest.json` and `package.json` versions move together**, and
+  `src/version-lockstep.test.ts` enforces it. The manifest version is what the
+  platform submits and what `civitai app submit` compares against the highest
+  approved version; `package.json`'s is what the build and toolchain read. These
+  two had drifted all the way to manifest `0.2.22` against package `0.1.0` — the
+  guard could only land once they were reconciled, at `0.2.23`.
+- **`buildCommand` is `pnpm run build` and `outputDir` is `dist`.** These are
+  what the *platform* runs to build the live app, so treat that pair as the
+  highest-blast-radius lines in the repo. They are also not optional here: with
+  a pnpm lockfile and no `buildCommand`, the platform falls back to the legacy
+  default `npm run build` → `npm ci` → a `package-lock.json` this repo does not
+  commit, and `civitai app validate` fails the repo outright. The schema
+  requires `outputDir` whenever `buildCommand` is set.
 - `.env.production` bakes `VITE_BLOCK_ALLOWED_PARENT_ORIGINS` into the bundle at
   **build time**. Wrong value = the `IframeTransport` drops every host message
   and the iframe renders blank.
