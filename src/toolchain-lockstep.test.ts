@@ -34,6 +34,12 @@ import { describe, expect, it } from 'vitest';
  *          down twice and asserted equal here. This is the assertion that
  *          actually compares two values; the node ones assert a structure.
  *
+ * A THIRD consumer joins them at the bottom of this file: the PLATFORM's own
+ * builder, driven by `block.manifest.json`'s `buildCommand`. CI green says
+ * nothing about that one — `.github/` is not part of the submitted bundle — so
+ * the workflow and the manifest are two independent statements of "how this
+ * repo is built", and the last assertion derives both and compares them.
+ *
  * Read off disk rather than imported: `tsconfig.json` scopes `include` to
  * `src` (plus `vite.config.ts`), and `import.meta.url` makes the paths
  * independent of the runner's working directory.
@@ -78,6 +84,19 @@ function stepBlock(workflow: string, actionPrefix: string): string[] {
     block.push(line);
   }
   return block;
+}
+
+/**
+ * The package manager CI installs, derived from the workflow rather than
+ * assumed: a `pnpm/action-setup` step means pnpm, and its absence means the
+ * plain `npm` that ships with `actions/setup-node`. Throws if the workflow is
+ * empty, so "no evidence either way" can never be compared to anything.
+ */
+function ciPackageManager(workflow: string): 'pnpm' | 'npm' {
+  if (workflow.trim() === '') {
+    throw new Error('.github/workflows/ci.yml is empty — no CI package manager to compare against');
+  }
+  return /^\s*-\s+uses:\s*pnpm\/action-setup@/m.test(workflow) ? 'pnpm' : 'npm';
 }
 
 /** Every `key: value` at any depth inside a step block, as pairs. */
@@ -142,5 +161,34 @@ describe('toolchain lockstep', () => {
     // would rot on a routine `nix flake update` and turn main red for nothing —
     // a permanently-red gate teaches everyone to merge through it.
     expect(ciPin).toBe(flakePin[1]);
+  });
+
+  it('keeps the platform builder on the same package manager as CI', () => {
+    // `block.manifest.json`'s `buildCommand` is what the PLATFORM runs when it
+    // builds the submitted bundle, and CI green says nothing about it: the
+    // bundle does not carry `.github/`, so the workflow never executes on the
+    // platform's side and the platform's command never executes on CI's. A
+    // mismatch hands the builder a tree its package manager cannot install
+    // reproducibly. Not hypothetical — this repo shipped exactly that state
+    // (an npm `buildCommand` beside a pnpm-only lockfile) and it took
+    // `civitai app validate` to catch it, long after CI had gone green.
+    //
+    // BOTH sides are derived. Hardcoding `'pnpm'` on the CI side would make
+    // this assertion's name a lie: switching CI to npm would leave it green
+    // while the two disagreed, which is the precise failure it is named for.
+    const ci = ciPackageManager(workflow);
+
+    const manifest = JSON.parse(repoFile('../block.manifest.json')) as {
+      buildCommand?: unknown;
+    };
+    if (typeof manifest.buildCommand !== 'string') {
+      throw new Error('block.manifest.json has no string "buildCommand" to compare against');
+    }
+    const builder = manifest.buildCommand.trim().split(/\s+/)[0];
+    if (builder === undefined || builder === '') {
+      throw new Error('block.manifest.json "buildCommand" is empty — no package manager to compare against');
+    }
+
+    expect(builder).toBe(ci);
   });
 });
