@@ -8,9 +8,6 @@ importers:
 
   .:
     dependencies:
-      '@civitai/app-sdk':
-        specifier: ^0.36.0
-        version: 0.36.0
       '@civitai/sdk':
         specifier: ^0.2.0
         version: 0.2.0
@@ -21,6 +18,9 @@ importers:
         specifier: ^19.0.0
         version: 19.2.6(react@19.2.6)
     devDependencies:
+      '@civitai/app-sdk':
+        specifier: ^0.36.0
+        version: 0.36.0
       '@testing-library/jest-dom':
         specifier: ^6.9.1
         version: 6.9.1
