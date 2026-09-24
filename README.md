@@ -22,7 +22,7 @@ What makes it different from `/generate`:
 Civitai is dogfooding its own [App Blocks platform](https://github.com/civitai/civitai-app-starters). To validate that an *external* developer can build a block end-to-end using only the public SDK + documentation, we built this block **outside** the platform monorepo:
 
 - This repo is on `ZacxDev` (personal namespace), not `civitai/*`
-- The block depends on `@civitai/app-sdk` + `@civitai/blocks-react` **as installed packages**, not workspace siblings
+- The block depends on `@civitai/app-sdk` + `@civitai/sdk` **as installed packages**, not workspace siblings
 - The deploy story (`pnpm build` → Vite bundle → nginx static + CSP `frame-ancestors`) is what any block author will do
 
 If you're an external developer reading this — congrats, you found a working reference implementation.
@@ -40,24 +40,67 @@ If you're an external developer reading this — congrats, you found a working r
 │ │       └─ "this iframe"   │  │                                  │  │
 │ └──────────────────────────┘  │  BLOCK_INIT { token, context,    │  │
 │                                │              viewer, settings }  │  │
-│                                │  SUBMIT_WORKFLOW {…}             │  │
+│                                │  RESIZE_IFRAME, pickers only     │  │
 │                                └──────────────────────────────────┘  │
 └─────────────────────────────────────────────────────────────────────┘
                                        │
                                        │ block-scoped JWT
                                        ▼
                           ┌──────────────────────────────┐
-                          │ civitai.com /api/v1/         │
-                          │  - models/:id                │
-                          │  - buzz/balance              │
-                          │  - block-tokens (refresh)    │
+                          │ civitai.com /api/v1/blocks/  │
+                          │  - workflows/estimate        │
+                          │  - workflows/submit          │
+                          │  - workflows/poll            │
+                          │  - workflows/cancel          │
+                          │  - buzz                      │
                           │                              │
-                          │ orchestrator (poc)           │
-                          │  - workflow submission       │
-                          │     attributed with          │
-                          │     metadata.block.*         │
+                          │ each route a thin adapter    │
+                          │ over the SAME procedure the  │
+                          │ bridge op used to call       │
                           └──────────────────────────────┘
 ```
+
+### The platform seam
+
+Everything platform-shaped lives behind [`src/platform/`](./src/platform/), and that
+directory is the **only** place `@civitai/sdk` is named — pinned by
+[`src/platform-seam.test.ts`](./src/platform-seam.test.ts), which also asserts no
+importer of `@civitai/blocks-react` is left. The hooks there keep the signatures the
+bridge package's hooks had (`useBuzzWorkflow`, `useBuzzBalance`, `useCheckpointPicker`,
+…), which is why a 3,400-line `App.tsx` changed at its import block rather than
+throughout.
+
+The bridge is still used, but only for genuine **host UI**: the iframe resize and the
+Buzz-purchase / Checkpoint pickers. Everything that is data goes over REST.
+
+### Known gaps on the SDK transport
+
+Three losses, all deliberate, all stated because a silent one is worse than a missing
+feature:
+
+1. 🔴 **The generation path is NOT verified against production.** The four routes it
+   calls — `/api/v1/blocks/workflows/{estimate,submit,poll,cancel}` — are merged in
+   `civitai/civitai` (`2a2eb0fe2f`, #5068) but **not deployed**: as of 2026-09-24 all
+   four answer `404 text/html` on civitai.com, where a deployed block route answers
+   `401 {"error":"Block token required"}` in JSON. The client here is written against
+   those route files' committed contract and covered against a fake server
+   ([`src/platform/testing.ts`](./src/platform/testing.ts)); nothing about it has been
+   exercised end to end against a real civitai.com. `GET /api/v1/blocks/buzz` *is*
+   deployed.
+
+2. 🔴 **The viewer's Checkpoint override no longer persists.** The bridge wrote it into
+   `block_user_settings` via `SET_USER_CHECKPOINT`; `@civitai/sdk` does not carry that
+   request and there is **no REST route for block user settings**. A swap still applies
+   immediately and lasts the session, then falls back to the publisher default on
+   remount. `useCheckpointPicker().persist` is a documented no-op rather than a
+   rejection, because rejecting would fire the call site's rollback and show an error
+   banner on every swap.
+
+3. **Two smaller ones.** The Checkpoint picker can no longer pre-highlight the current
+   selection (`OPEN_RESOURCE_PICKER` takes no `currentVersionId`), and
+   `openPurchaseModal` no longer reports `newBalance` (the SDK projects the reply down
+   to `{ purchased }`) — the block refetches the balance instead, so nothing reads a
+   wrong number.
 
 ## Quick start
 
@@ -76,11 +119,12 @@ pnpm run dev:harness     # http://localhost:5173 — local dev with simulated ho
 Without nix: node major per [`.nvmrc`](./.nvmrc) and pnpm 11 (see [`flake.nix`](./flake.nix)).
 
 The dev harness simulates BLOCK_INIT, intercepts outbound `postMessage`s, and echoes token refreshes — so you can iterate on the UI without civitai.com actually embedding you.
+It also serves the block REST routes locally (`src/dev/harnessServer.ts`), so a generation runs end to end on your machine and **no request leaves it**. That server exists because the transport moved: since the `@civitai/sdk` port the data path is `fetch`, and without it `dev:harness` would fire real, money-shaped POSTs at civitai.com signed with the harness's deliberately-invalid mock JWT.
 
 ## Build & deploy
 
 ```bash
-pnpm test                   # 24 vitest files
+pnpm test                   # vitest — UI suites + the platform layer against a fake server
 pnpm run typecheck          # tsc --noEmit
 pnpm build                  # → ./dist/
 pnpm run docker:build       # → ghcr.io/zacxdev/civitai-block-generate-from-model:latest
@@ -112,12 +156,13 @@ Publisher-configurable settings:
 
 ```json
 "dependencies": {
-  "@civitai/app-sdk": "^0.6.0",
-  "@civitai/blocks-react": "^0.4.0"
+  "@civitai/app-sdk": "^0.36.0",
+  "@civitai/sdk": "^0.2.0"
 }
 ```
 
 Published from [civitai/civitai-app-starters](https://github.com/civitai/civitai-app-starters).
+`@civitai/app-sdk` is kept for its **types only** (`BlockWorkflowSnapshot`, `ModelSlotContext`, `ShowcaseImage`, …); `@civitai/sdk` is the runtime.
 
 ## License
 

@@ -83,9 +83,13 @@ suffix are topic worktrees of the same remotes, usually on a feature branch.
 | `civitai app init/validate/submit`, login, dev tunnel | **`civitai/cli`** (Go) | `cli` |
 | Public developer docs (developer.civitai.com) | **`civitai/civitai-developer-docs`** | `civitai-developer-docs` |
 
-**All five `@civitai/*` packages ship from the one starters repo** —
-`packages/civitai-{app-sdk,blocks-react,components,components-react,theme}`.
-This block installs two of them (`@civitai/app-sdk`, `@civitai/blocks-react`).
+**Every `@civitai/*` package ships from the one starters repo** —
+`packages/civitai-{app-sdk,sdk,blocks-react,components,components-react,theme}`.
+This block installs two of them: `@civitai/sdk` (the runtime — REST + host UI)
+and `@civitai/app-sdk` (types only). It was ported OFF `@civitai/blocks-react`,
+the postMessage bridge package; do not reintroduce it. `src/platform/` is the
+only directory allowed to name `@civitai/sdk`, and `src/platform-seam.test.ts`
+enforces both halves.
 A missing hook, a wrong type, a mock host that doesn't simulate something: that
 is a PR *there*, not a workaround here.
 
@@ -98,9 +102,9 @@ edges: `ZacxDev/civitai-app-gen-matrix`, `…-model-benchmarking`,
 1. **The installed package itself.** `node_modules/@civitai/<pkg>/dist/*.d.ts`
    and its `README.md` are the only source guaranteed to describe *the version
    this repo builds against* — currently `@civitai/app-sdk@^0.36.0` and
-   `@civitai/blocks-react@^0.44.2`; check `package.json` first. Subpaths
-   matter: this repo imports from `@civitai/app-sdk/blocks` and the
-   `@civitai/blocks-react` root.
+   `@civitai/sdk@^0.2.0`; check `package.json` first. Subpaths matter: this
+   repo imports types from `@civitai/app-sdk/blocks`, and the `@civitai/sdk`
+   root plus `@civitai/sdk/testing` (the fake transport) from `src/platform/`.
 2. **https://developer.civitai.com/apps/** — `guide/{quickstart,concepts,embedding,theming,text-to-image,comfy-cloud}`
    and `reference/{hooks,manifest,messages,scopes,components,generation,cli}`.
    Best for *why* and for the message-bridge contract. ⚠️ The generated pages
