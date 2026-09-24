@@ -11,9 +11,9 @@ importers:
       '@civitai/app-sdk':
         specifier: ^0.36.0
         version: 0.36.0
-      '@civitai/blocks-react':
-        specifier: ^0.44.2
-        version: 0.44.2(@civitai/app-sdk@0.36.0)(react@19.2.6)
+      '@civitai/sdk':
+        specifier: ^0.2.0
+        version: 0.2.0
       react:
         specifier: ^19.0.0
         version: 19.2.6
@@ -170,19 +170,12 @@ packages:
     resolution: {integrity: sha512-L9X9RrSyuWZnwv6d3+lQ3ySCdKKycDXaBOAVgr1O0zb1B6Q/XamfpIYF//yqzgROz+TyTo6wZQy9S32IGy7U9w==}
     engines: {node: '>=20'}
 
-  '@civitai/blocks-react@0.44.2':
-    resolution: {integrity: sha512-hkLmEUcNlO/Igk8Xn2iArHACbYxIF2E9zRTduhyDPad8SgajTUXVZ4cBRp3k3ulCS9gx+d501KFj85mh9/69AA==}
-    engines: {node: '>=20'}
-    peerDependencies:
-      '@civitai/app-sdk': '>=0.29.0 <1.0.0'
-      react: ^18.0.0 || ^19.0.0
+  '@civitai/orchestration-client@0.2.0-beta.101':
+    resolution: {integrity: sha512-z2dCYCnFZCm84F4Oe7bPahTfLZbClInQCeFaz5a1Y3CfRIjHJisG7WbtcpAhaw0Qa+bsQ+plwF+K2MCyCbgZFg==}
+    engines: {git: '>=2.11.0', node: '>=18.0.0', npm: '>=7.19.0', yarn: '>=1.7.0'}
 
-  '@civitai/components@0.3.1':
-    resolution: {integrity: sha512-5sRNMM8m1ikHGntwv4aWwpbU25DdngClwgTRtuslnTuejJG7178E3xwsRY7g4B2GBaCW5D4MIP4zUjRZNzMcUw==}
-    engines: {node: '>=20'}
-
-  '@civitai/theme@0.2.1':
-    resolution: {integrity: sha512-ToZCD7isDBrKGGcf4+5r3LRTCXr8JNZGNL1VZxDGBJ9l+2c5FJ90KSSVx5kWWI/JY0BYXRvj9YAJGiqpZ5ku1Q==}
+  '@civitai/sdk@0.2.0':
+    resolution: {integrity: sha512-slzsqNV19SE+j0j9BorSCpatJeMJ0Lp0c5rhTNnspT008iZae7M7d/dhVhr3kiAYPfhPfxzD6MlGDzk1+v4A+w==}
     engines: {node: '>=20'}
 
   '@csstools/color-helpers@6.0.2':
@@ -385,6 +378,10 @@ packages:
     peerDependenciesMeta:
       '@noble/hashes':
         optional: true
+
+  '@hey-api/client-fetch@0.1.14':
+    resolution: {integrity: sha512-6RoO2prOVrQfx2wClJ7DkeIVWQokiRLIdqiuxvFTfWEQVfOc+hQhAw6/IijYrSM9cA7A7DzmHpzTLc/gbQ7/2Q==}
+    deprecated: Starting with v0.73.0, this package is bundled directly inside @hey-api/openapi-ts.
 
   '@jridgewell/gen-mapping@0.3.13':
     resolution: {integrity: sha512-2kkt/7niJ6MgEPxF0bYdQ6etZaA+fQvDcLKckhy1yIQOzaoKjBBjSj63/aLVjYE3qhRt5dvM+uUyfCg6UKCBbA==}
@@ -897,6 +894,9 @@ packages:
     resolution: {integrity: sha512-Xf0nWe6RseziFMu+Ap9biiUbmplq6S9/p+7w7YXP/JBHhrUDDUhwa+vANyubuqfZWTveU//DYVGsDG7RKL/vEw==}
     engines: {node: '>=0.10.0'}
 
+  rfc6902@5.3.0:
+    resolution: {integrity: sha512-8x9uqKB5FeC3jhdtmBtI2Z2GR0+VE1VLbQ7Luy5RcnCxUa4+Z1n8w2G1D+GevkRUT33nbbfpAK5O4LhRbnaIPQ==}
+
   rollup@4.60.4:
     resolution: {integrity: sha512-WHeFSbZYsPu3+bLoNRUuAO+wavNlocOPf3wSHTP7hcFKVnJeWsYlCDbr3mTS14FCizf9ccIxXA8sGL8zKeQN3g==}
     engines: {node: '>=18.0.0', npm: '>=8.0.0'}
@@ -972,6 +972,9 @@ packages:
   tr46@6.0.0:
     resolution: {integrity: sha512-bLVMLPtstlZ4iMQHpFHTR7GAGj2jxi8Dg0s2h2MafAE4uSWF98FC/3MomU51iQAMf8/qDUbKWf5GxuvvVcXEhw==}
     engines: {node: '>=20'}
+
+  tslib@2.8.1:
+    resolution: {integrity: sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w==}
 
   typescript@5.9.3:
     resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
@@ -1239,18 +1242,15 @@ snapshots:
 
   '@civitai/app-sdk@0.36.0': {}
 
-  '@civitai/blocks-react@0.44.2(@civitai/app-sdk@0.36.0)(react@19.2.6)':
+  '@civitai/orchestration-client@0.2.0-beta.101':
     dependencies:
-      '@civitai/app-sdk': 0.36.0
-      '@civitai/components': 0.3.1
-      '@civitai/theme': 0.2.1
-      react: 19.2.6
+      '@hey-api/client-fetch': 0.1.14
+      rfc6902: 5.3.0
+      tslib: 2.8.1
 
-  '@civitai/components@0.3.1':
+  '@civitai/sdk@0.2.0':
     dependencies:
-      '@civitai/theme': 0.2.1
-
-  '@civitai/theme@0.2.1': {}
+      '@civitai/orchestration-client': 0.2.0-beta.101
 
   '@csstools/color-helpers@6.0.2': {}
 
@@ -1355,6 +1355,8 @@ snapshots:
     optional: true
 
   '@exodus/bytes@1.15.1': {}
+
+  '@hey-api/client-fetch@0.1.14': {}
 
   '@jridgewell/gen-mapping@0.3.13':
     dependencies:
@@ -1818,6 +1820,8 @@ snapshots:
 
   require-from-string@2.0.2: {}
 
+  rfc6902@5.3.0: {}
+
   rollup@4.60.4:
     dependencies:
       '@types/estree': 1.0.8
@@ -1903,6 +1907,8 @@ snapshots:
   tr46@6.0.0:
     dependencies:
       punycode: 2.3.1
+
+  tslib@2.8.1: {}
 
   typescript@5.9.3: {}
 

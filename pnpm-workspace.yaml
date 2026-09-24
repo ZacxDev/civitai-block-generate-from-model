@@ -19,3 +19,31 @@ packages:
 # only ever ran in CI could never have caught a missing entry here.
 allowBuilds:
   esbuild: true
+
+# 🔴 A DELIBERATE, NARROW EXEMPTION FROM A SUPPLY-CHAIN CONTROL. READ BEFORE EXTENDING.
+#
+# pnpm 11 enforces a `minimumReleaseAge` (24h by default): a lockfile entry for a
+# package published within that window is REFUSED. That control exists to blunt
+# third-party supply-chain attacks — a compromised maintainer account publishing a
+# malicious version — by giving the ecosystem time to detect and yank it.
+#
+# `@civitai/sdk@0.2.0` is FIRST-PARTY: published from this org's own
+# `civitai-app-starters` monorepo (2026-09-23T03:49:30Z), by hand, because npm OIDC
+# trusted publishing cannot create a package that does not exist yet. The threat the
+# waiting period guards against — someone else's compromised release — does not apply
+# to a version we cut ourselves. Same decision, same package, as `civitai-app-requests`,
+# the first fleet app ported off the bridge.
+#
+# 🔴 IT IS PINNED TO THE EXACT VERSION ON PURPOSE. A bare `@civitai/sdk` would exempt
+# EVERY FUTURE RELEASE of the package, forever and silently — including one cut by
+# someone else, or by a compromised token.
+#
+# 🔴 THE POLICY IS NOT DISABLED AND MUST NOT BE. It still runs and still verifies every
+# other lockfile entry; exactly one is exempt. Do NOT "fix" a future violation by
+# setting `minimumReleaseAge: 0` or by dropping the version pin — that removes the
+# protection for every dependency.
+#
+# REMOVE THIS ENTRY once `@civitai/sdk` moves past 0.2.0. It is then dead config that
+# silently weakens the next reader's assumptions.
+minimumReleaseAgeExclude:
+  - '@civitai/sdk@0.2.0'

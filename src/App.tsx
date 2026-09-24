@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 
+// The platform seam (`src/platform/`) — the only directory that imports
+// `@civitai/sdk`. These names and signatures are the ones `@civitai/blocks-react`
+// exported, kept deliberately so this file changed at its import block rather
+// than throughout when the block moved off the postMessage bridge onto the
+// public `/api/v1/blocks/*` REST routes.
 import {
   useBlockContext,
   useBlockResize,
@@ -11,7 +16,7 @@ import {
   useCheckpointPicker,
   WorkflowEstimateError,
   WorkflowSubmitError,
-} from '@civitai/blocks-react';
+} from './platform/index.js';
 import type {
   BlockCheckpointInfo,
   BlockContext,
