@@ -21,13 +21,13 @@ import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
@@ -45,7 +45,7 @@ const generate = () =>
   screen.getByRole('button', { name: /Generate Image|Re-generate Image/ });
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Queue slots — status (Feature 1)', () => {

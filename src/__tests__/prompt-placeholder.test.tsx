@@ -11,14 +11,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 
-import { blocksReactMockFactory, renderApp, resetBlocksReactMock } from '../test/test-utils';
+import { platformMockFactory, renderApp, resetPlatformMock } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Prompt placeholder', () => {

@@ -12,14 +12,14 @@ import { screen, waitFor, fireEvent } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockSettings,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
@@ -32,7 +32,7 @@ function snapWithCost(total: number) {
 }
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
   setMockSettings({ show_advanced: true });
 });
 

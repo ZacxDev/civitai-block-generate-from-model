@@ -16,18 +16,18 @@ import userEvent from '@testing-library/user-event';
 import { waitFor } from '@testing-library/react';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   generate,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Three-dots Advanced toggle (Tier-3 #3)', () => {

@@ -20,14 +20,14 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockBuzzBalance,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
@@ -42,7 +42,7 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Generation queue (task 3)', () => {
@@ -600,7 +600,7 @@ describe('Generation queue (task 3)', () => {
   it('a THROWN workflow-failed submit says something different from a plain exception', async () => {
     // The SDK is emphatic that the two codes differ on whether money may have
     // moved, so they must not share a sentence.
-    const { WorkflowSubmitError } = await import('@civitai/blocks-react');
+    const { WorkflowSubmitError } = await import('../platform/index.js');
     const spies = getMockSpies();
     spies.submit.mockRejectedValue(
       new WorkflowSubmitError(

@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 
+// The platform seam (`src/platform/`) — the only directory that imports
+// `@civitai/sdk`. These names and signatures are the ones the blocks-react
+// bridge package exported, kept deliberately so this file changed at its import
+// block rather than throughout when the block moved off the postMessage bridge
+// onto the public `/api/v1/blocks/*` REST routes.
 import {
   useBlockContext,
   useBlockResize,
@@ -11,7 +16,7 @@ import {
   useCheckpointPicker,
   WorkflowEstimateError,
   WorkflowSubmitError,
-} from '@civitai/blocks-react';
+} from './platform/index.js';
 import type {
   BlockCheckpointInfo,
   BlockContext,
@@ -159,11 +164,14 @@ export function resolveParentOrigin(referrer: string | undefined): string {
 }
 
 /**
- * Raw postMessage of the SDK REQUEST_SIGN_IN envelope. Deliberately NOT routed
- * through an SDK hook so this works without waiting on a `@civitai/blocks-react`
- * npm publish (the new `useRequestSignIn` helper produces the identical wire
- * message). The host's IframeHost honors this only after BLOCK_READY and from
- * the pinned origin. `returnUrl` is optional; the host defaults it to the
+ * Raw postMessage of the SDK REQUEST_SIGN_IN envelope.
+ *
+ * Kept raw after the `@civitai/sdk` port rather than routed through
+ * `app.host.requestSignIn()`, which emits the IDENTICAL wire message: this one
+ * is synchronous and needs no initialised client, so the signed-out CTA still
+ * works in the window before — or entirely without — a handshake, which is
+ * exactly the state an anonymous viewer is in. The host's IframeHost honors it
+ * only after BLOCK_READY and from the pinned origin. `returnUrl` is optional; the host defaults it to the
  * current page and sanitises it to a same-origin path.
  */
 export function postRequestSignIn(payload?: { returnUrl?: string }): void {
@@ -867,13 +875,14 @@ export function App() {
     })
       .then((snap) => {
         if (myId !== estimateInFlightRef.current) return;
-        // 🔴 A FAILED estimate no longer arrives here. Up to
-        // @civitai/blocks-react 0.5.x `estimate()` RESOLVED a failure snapshot
-        // and left the hook's `error` null, so this branch handled it. From
-        // 0.44.x it THROWS `WorkflowEstimateError` instead, so failures land in
-        // `.catch` below and the old `status === 'failed'` arm here was dead
-        // code sitting under a comment that said the opposite. Kept as a
-        // defensive no-cost guard only.
+        // 🔴 A FAILED estimate no longer arrives here. Up to blocks-react 0.5.x
+        // `estimate()` RESOLVED a failure snapshot and left the hook's `error`
+        // null, so this branch handled it; from 0.44.x it THREW
+        // `WorkflowEstimateError` instead, and `src/platform/workflows.ts` keeps
+        // that contract across the REST port (a `status:'failed'` reply and a
+        // non-2xx both reject). So failures land in `.catch` below and the old
+        // `status === 'failed'` arm here was dead code sitting under a comment
+        // that said the opposite. Kept as a defensive no-cost guard only.
         const cost = snap.cost?.total;
         // eslint-disable-next-line no-console
         console.debug('[gfm] estimate resolved', { attempt: myId, cost });
@@ -1106,9 +1115,14 @@ export function App() {
   const suffix = readString(settings.publisherSettings.default_prompt_suffix, '');
   const showAdvanced = readBoolean(settings.publisherSettings.show_advanced, false);
 
-  // The host computes the effective checkpoint (publisher default ∪ viewer
-  // override) before BLOCK_INIT. localCheckpoint shadows it for instant UI
-  // updates after a picker swap; falls back to the BLOCK_INIT value at mount.
+  // BLOCK_INIT carries the checkpoint the host resolved for this install. On
+  // the @civitai/sdk transport that is the PUBLISHER DEFAULT only — the bridge
+  // era's "publisher default ∪ viewer override" no longer holds, because the
+  // viewer's override is never written back (`persist` is a no-op; see
+  // src/platform/hooks.ts). localCheckpoint shadows it for instant UI updates
+  // after a picker swap and is the ONLY place a viewer override lives, which
+  // is exactly why it dies at mount — and why the swap is disclosed as
+  // session-only in the Advanced section.
   const effectiveCheckpoint: BlockCheckpointInfo | null =
     localCheckpoint ?? model.checkpoint ?? null;
   // For Checkpoint-bound installs the picker is suppressed — the model IS
@@ -1129,16 +1143,26 @@ export function App() {
         ...(effectiveCheckpoint ? { currentVersionId: effectiveCheckpoint.versionId } : {}),
       });
       if (!selected) return; // user dismissed
-      // Optimistic: update the label immediately. Then persist server-side.
+      // The swap applies immediately and for THIS SESSION ONLY. There is no
+      // server-side write behind it: `useCheckpointPicker().persist` is a
+      // documented no-op on the @civitai/sdk transport (no SET_USER_CHECKPOINT
+      // request, no REST route for block user settings — see the hook's
+      // docblock in src/platform/hooks.ts and README → "Known gaps"). We still
+      // call it so the day the SDK carries the request this call site needs no
+      // change, and because a mocked/real implementation can do work here.
+      //
+      // There is deliberately NO rollback branch around this call. Today's
+      // `persist` resolves unconditionally and cannot reject, so a `catch` that
+      // undid the optimistic update would be dead code that READS as
+      // "persistence failure is handled" while no persistence is attempted at
+      // all. What the viewer gets instead is honest and reachable: once
+      // `localCheckpoint` is set, the Advanced section renders a session-only
+      // note under the checkpoint row (see AdvancedSection). If `persist` ever
+      // becomes a real call that can reject, it will surface through the outer
+      // catch below — and that is the moment to decide what a failure should
+      // look like, with a test that can actually reach it.
       setLocalCheckpoint(selected);
-      try {
-        await checkpointPicker.persist(selected.versionId);
-      } catch (err) {
-        // Persist failed (e.g. wrong-ecosystem) — surface to user and roll
-        // back the optimistic update.
-        setLocalCheckpoint(null);
-        setCheckpointError(err instanceof Error ? err.message : 'could not save checkpoint');
-      }
+      await checkpointPicker.persist(selected.versionId);
     } catch (err) {
       setCheckpointError(err instanceof Error ? err.message : 'picker failed');
     }
@@ -1528,6 +1552,11 @@ export function App() {
             showCheckpointPicker={showCheckpointPicker}
             effectiveCheckpoint={effectiveCheckpoint}
             onChangeCheckpoint={handleChangeCheckpoint}
+            // `localCheckpoint` is non-null EXACTLY when the viewer swapped in
+            // this session — nothing else writes it. That is also exactly the
+            // selection that is not persisted anywhere, so it is the right
+            // trigger for the session-only note.
+            checkpointIsSessionOnly={localCheckpoint !== null}
           />
 
           <label style={debugRowStyle(theme)}>
@@ -1830,6 +1859,13 @@ function AdvancedSection(props: {
   showCheckpointPicker: boolean;
   effectiveCheckpoint: BlockCheckpointInfo | null;
   onChangeCheckpoint: () => void;
+  // True once the viewer has swapped the checkpoint in this session. The
+  // swap is NOT written back to civitai — there is no host request and no
+  // REST route for block user settings on the @civitai/sdk transport — so
+  // it is lost on remount. Drives the quiet note under the row: the viewer
+  // changed something and deserves to know how long it lasts. Nothing
+  // failed, so this is deliberately NOT error-styled.
+  checkpointIsSessionOnly: boolean;
 }) {
   const {
     open,
@@ -1845,6 +1881,7 @@ function AdvancedSection(props: {
     showCheckpointPicker,
     effectiveCheckpoint,
     onChangeCheckpoint,
+    checkpointIsSessionOnly,
   } = props;
 
   // Effective values for display: override wins, then showcase.
@@ -1878,29 +1915,48 @@ function AdvancedSection(props: {
             </p>
           )}
           {showCheckpointPicker && (
-            <div style={{ ...checkpointRowStyle(theme), marginBottom: 10 }}>
-              <span style={subtleStyle}>
-                Generating with:{' '}
-                {effectiveCheckpoint ? (
-                  <strong style={{ color: 'inherit', opacity: 1 }}>
-                    {effectiveCheckpoint.modelName}
-                    {effectiveCheckpoint.versionName
-                      ? ` (${effectiveCheckpoint.versionName})`
-                      : ''}
-                  </strong>
-                ) : (
-                  <em>no checkpoint configured</em>
-                )}
-              </span>
-              <button
-                type="button"
-                onClick={onChangeCheckpoint}
-                className="gfm-link"
-                style={linkButtonStyle()}
-                disabled={isBusy}
-              >
-                Change
-              </button>
+            <div style={{ marginBottom: 10 }}>
+              <div style={checkpointRowStyle(theme)}>
+                <span style={subtleStyle}>
+                  Generating with:{' '}
+                  {effectiveCheckpoint ? (
+                    <strong style={{ color: 'inherit', opacity: 1 }}>
+                      {effectiveCheckpoint.modelName}
+                      {effectiveCheckpoint.versionName
+                        ? ` (${effectiveCheckpoint.versionName})`
+                        : ''}
+                    </strong>
+                  ) : (
+                    <em>no checkpoint configured</em>
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={onChangeCheckpoint}
+                  className="gfm-link"
+                  style={linkButtonStyle()}
+                  disabled={isBusy}
+                >
+                  Change
+                </button>
+              </div>
+              {checkpointIsSessionOnly && (
+                // The honest signal for the no-op `persist`. Quiet, informational,
+                // NOT an error — nothing failed; civitai simply has no surface to
+                // store a viewer's checkpoint override on this transport yet. It
+                // appears only after a swap (so it never nags the 90% who never
+                // touch the picker) and stays put rather than firing a toast on
+                // every change. role="status" so a screen reader hears it once,
+                // politely, at the moment the label changes.
+                <p
+                  role="status"
+                  data-testid="gfm-checkpoint-session-only"
+                  style={checkpointNoteStyle}
+                >
+                  Applies to this session only — reloading the block restores the
+                  default checkpoint.
+                </p>
+              )}
             </div>
           )}
           {editable ? (
@@ -2846,8 +2902,8 @@ function StyleSheet() {
  * Which theme to paint with BEFORE BLOCK_INIT lands.
  *
  * `useBlockContext().theme` is NOT usable here: the SDK's pre-init snapshot
- * hardcodes `theme: 'light'` (@civitai/blocks-react internal/transport.ts),
- * so it is a sentinel, not a signal — honouring it paints every viewer white
+ * hardcodes `theme: 'light'` (`EMPTY_SNAPSHOT` in `@civitai/sdk`'s
+ * core/transport.ts), so it is a sentinel, not a signal — honouring it paints every viewer white
  * for the ~100ms until the host's real theme arrives.
  *
  * That matters because index.html now ships a static shimmer skeleton that
@@ -2868,22 +2924,24 @@ function bootThemeGuess(): 'dark' | 'light' {
     //    React's first render agrees with the pixels already on screen: it is
     //    the same value, not an independent re-derivation that could differ.
     //
-    //    (Since blocks-react 0.44 the SDK's own transport also seeds its
-    //    snapshot from the fragment before React renders, so `theme` from
-    //    useBlockContext() is ALSO the host's answer when a fragment exists —
+    //    (The SDK's own transport also seeds its snapshot from the fragment
+    //    before React renders — true of blocks-react from 0.44 and of
+    //    `@civitai/sdk` today — so `theme` from useBlockContext() is ALSO the
+    //    host's answer when a fragment exists —
     //    but it stays the `'light'` sentinel when one does not, and this
     //    function must be right in both cases. Reading what was painted is.)
     //
     //    🔴 DO NOT "simplify" this to `parseBlockInitFragment(location.hash)`.
     //    It was written that way first and it is WRONG, silently: the SDK's own
-    //    iframeTransport reads the fragment during its init and then STRIPS it
-    //    from the URL (`stripBlockInitFragment` + `history.replaceState`,
-    //    blocks-react internal/iframeTransport.js). That init runs before this
-    //    component renders, so by here the hash is already empty and the read
-    //    falls through to the OS guess — producing exactly the dark→light
-    //    repaint this function exists to prevent. Measured in a real browser;
-    //    a jsdom test cannot see it, because mocking @civitai/blocks-react
-    //    means the transport never runs and never strips.
+    //    IframeTransport reads the fragment during its init and then STRIPS it
+    //    from the URL (`stripBlockInitFragment` + `history.replaceState`;
+    //    re-read in `@civitai/sdk` at core/transports/iframe-transport.ts:197-221
+    //    during the port, so the hazard survived the transport swap). That init
+    //    runs before this component renders, so by here the hash is already
+    //    empty and the read falls through to the OS guess — producing exactly
+    //    the dark→light repaint this function exists to prevent. Measured in a
+    //    real browser; a jsdom test cannot see it, because mocking the platform
+    //    seam means the transport never runs and never strips.
     const painted = document.documentElement.getAttribute('data-civitai-boot-theme');
     if (painted === 'dark' || painted === 'light') return painted;
 
@@ -3504,6 +3562,17 @@ const sectionLabelStyle: CSSProperties = {
   textTransform: 'uppercase',
   opacity: 0.65,
   margin: '0 0 6px 0',
+};
+
+// The session-only note under the checkpoint row. Deliberately in the
+// `subtleStyle` family (same opacity/margin vocabulary as "Advanced
+// (read-only)") and NOT in `errorTextStyle` — no red, no icon. It reports a
+// scope, not a failure.
+const checkpointNoteStyle: CSSProperties = {
+  ...subtleStyle,
+  fontSize: 12,
+  margin: '6px 2px 0 2px',
+  lineHeight: 1.4,
 };
 
 const errorTextStyle: CSSProperties = {

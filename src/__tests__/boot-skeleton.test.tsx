@@ -32,14 +32,14 @@ import {
 } from '@civitai/app-sdk/blocks';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockReady,
   setMockTheme,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 // Import AFTER the mock is registered so the App picks up the stubs.
 import { App } from '../App';
@@ -119,7 +119,7 @@ function loadingSkeletonSource(): string {
 }
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
   setPrefersDark(false);
   // The fragment is read from the real `location.hash`, so a test that sets
   // one must not leak it into the next — a stale hash would silently make a
@@ -380,7 +380,7 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     // wrong in a way no mocked test can see: the SDK's own iframeTransport
     // reads the fragment during init and then STRIPS it from the URL
     // (stripBlockInitFragment + history.replaceState), and that init runs
-    // BEFORE this component renders. Mocking @civitai/blocks-react means the
+    // BEFORE this component renders. Mocking the platform seam means the
     // transport never runs, so the hash survives in tests and the re-parse
     // looked correct — while the real browser showed dark-then-light.
     //

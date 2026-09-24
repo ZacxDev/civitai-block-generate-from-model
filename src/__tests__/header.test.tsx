@@ -17,14 +17,14 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen } from '@testing-library/react';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockContext,
   DEFAULT_CHECKPOINT,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 // Import AFTER the mock is registered so the App picks up the stubs.
 // (vi.mock is hoisted, but the explicit ordering keeps reviewers from
@@ -32,7 +32,7 @@ vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Header (Tier-3) — title only, no subtitle', () => {

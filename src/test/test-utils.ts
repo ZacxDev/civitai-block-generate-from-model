@@ -1,16 +1,27 @@
 /**
- * Test helpers for the block app.
+ * Test helpers for the block app's UI.
  *
- * Strategy: rather than spin up the real `IframeTransport` + a fake
- * postMessage parent, we stub `@civitai/blocks-react` at the module level
- * via `vi.mock(...)`. Each test file calls `installBlocksReactMock()` from
- * its top-level setup (before `import { App }`) and then shapes individual
- * hook responses through the setter functions below.
+ * Strategy: rather than drive a real transport and a real server, we stub the
+ * app's OWN platform seam (`src/platform/`) at the module level via
+ * `vi.mock(...)`. Each test file calls
+ * `vi.mock('../platform/index.js', () => platformMockFactory())` at the top of
+ * the file (before `import { App }`) and then shapes individual hook responses
+ * through the setter functions below.
  *
- * This keeps tests fast (no async transport wait) and keeps the surface
- * area narrow — we only emulate the hook contract the App actually depends
- * on. If the App grows to use a hook not represented here, add it here
- * rather than fighting the harness.
+ * 🔴 THE SEAM MOVED, AND THAT IS WHY THIS FILE STILL LOOKS THE SAME. Before the
+ * `@civitai/sdk` port these mocks stood in for the blocks-react bridge package,
+ * an external package. They now stand in for `src/platform/`, which is OURS — so
+ * these tests no longer touch the transport at all, and NOTHING here is evidence
+ * about how the platform layer talks to the server. That is covered separately,
+ * against a fake HTTP server, in `src/__tests__/platform-*.test.ts`. Read the
+ * two together: this file pins the block's behaviour given a platform, those
+ * files pin the platform given a server.
+ *
+ * This keeps UI tests fast (no async transport wait) and keeps the surface area
+ * narrow — we only emulate the hook contract the App actually depends on. If
+ * the App grows to use a hook not represented here, add it here rather than
+ * fighting the harness; because the mocked module is the app's own seam, an
+ * omitted export fails loudly instead of reading `undefined`.
  */
 import { useEffect, useState, type ReactElement } from 'react';
 import { expect, vi } from 'vitest';
@@ -108,7 +119,7 @@ export const DEFAULT_MODEL_CONTEXT: ModelSlotContext = {
 
 /* ------------------------------------------------------------------ *
  *  Mutable hook state — each test file controls these via the
- *  setter helpers below; reset between tests via `resetBlocksReactMock`.
+ *  setter helpers below; reset between tests via `resetPlatformMock`.
  * ------------------------------------------------------------------ */
 
 type WorkflowState = {
@@ -146,7 +157,6 @@ interface MockState {
     openPurchaseModal: ReturnType<typeof vi.fn>;
     checkpointOpen: ReturnType<typeof vi.fn>;
     checkpointPersist: ReturnType<typeof vi.fn>;
-    track: ReturnType<typeof vi.fn>;
     refetchBuzzBalance: ReturnType<typeof vi.fn>;
   };
 }
@@ -172,7 +182,6 @@ function makeFreshState(): MockState {
       openPurchaseModal: vi.fn(),
       checkpointOpen: vi.fn(),
       checkpointPersist: vi.fn(),
-      track: vi.fn(),
       refetchBuzzBalance: vi.fn(),
     },
   };
@@ -181,7 +190,7 @@ function makeFreshState(): MockState {
 let state: MockState = makeFreshState();
 
 /** Reset all mock state between tests. Call from `beforeEach`. */
-export function resetBlocksReactMock(): void {
+export function resetPlatformMock(): void {
   state = makeFreshState();
 }
 
@@ -303,27 +312,27 @@ export function getMockBuzzBalance(): BalanceState {
  *  Hook implementations the mock returns.
  * ------------------------------------------------------------------ */
 
+/**
+ * Exactly the fields `BlockContextValue` carries — no more.
+ *
+ * The pre-port mock also returned `renderMode`, `blockId` and `appId`, which
+ * the real platform hook does not: a test could have asserted on one and passed
+ * against a field production never provides. Trimmed with the seam swap.
+ */
 function useBlockContext() {
   return {
     ready: state.ready,
-    renderMode: 'iframe' as const,
     context: state.context,
     token: DEFAULT_TOKEN,
     settings: state.settings,
     viewer: state.viewer,
     theme: state.theme,
-    blockId: 'test-block',
     blockInstanceId: 'test-instance',
-    appId: 'test-app',
   };
 }
 
 function useBlockSettings(): BlockSettings {
   return state.settings;
-}
-
-function useBlockToken(): BlockToken & { refresh: () => Promise<void> } {
-  return { ...DEFAULT_TOKEN, refresh: async () => {} };
 }
 
 function useBlockResize(): void {
@@ -452,14 +461,6 @@ function useCheckpointPicker() {
   };
 }
 
-function useCivitaiNavigate() {
-  return { navigate: () => {} };
-}
-
-function useBlockAnalytics() {
-  return { track: state.spies.track };
-}
-
 /**
  * Render the App and flush the microtask queue once so the auto-estimate
  * effect's resolved promise lands inside an `act()` boundary. This keeps
@@ -511,35 +512,32 @@ export async function generate(
 }
 
 /**
- * Single source of truth for the `vi.mock('@civitai/blocks-react', ...)`
- * factory. Test files call `vi.mock('@civitai/blocks-react', () => blocksReactMockFactory())`
+ * Single source of truth for the `vi.mock('../platform/index.js', ...)` factory.
+ * Test files call `vi.mock('../platform/index.js', () => platformMockFactory())`
  * at the top of the file (must be before any `import { App }`).
  */
-export async function blocksReactMockFactory() {
+export async function platformMockFactory() {
   // `vi.importActual` and NOT a plain import: a static import of the module we
   // are mocking is circular and makes the whole test FILE fail to load, which
   // vitest reports as "no tests" rather than as a failure.
   const actual =
-    await vi.importActual<typeof import('@civitai/blocks-react')>('@civitai/blocks-react');
+    await vi.importActual<typeof import('../platform/index.js')>('../platform/index.js');
   return {
     // 🔴 RE-EXPORT THE REAL ERROR CLASSES. App.tsx branches with
     // `err instanceof WorkflowEstimateError`; a wholesale mock that omits them
     // makes that `instanceof undefined`, which THROWS inside the catch and
     // silently swallows the whole error path — the estimate error simply never
     // renders. This is the stale-wholesale-mock class: the module gained an
-    // export and the fake did not. They must be the REAL classes, not stubs,
-    // or `instanceof` is false for an error the real SDK threw.
+    // export and the fake did not. They must be the REAL classes, not stubs, or
+    // `instanceof` is false for an error the platform layer really threw.
     WorkflowEstimateError: actual.WorkflowEstimateError,
     WorkflowSubmitError: actual.WorkflowSubmitError,
     useBlockContext,
     useBlockSettings,
-    useBlockToken,
     useBlockResize,
     useBuzzWorkflow,
     useBuzzBalance,
     useBuzzPurchase,
     useCheckpointPicker,
-    useCivitaiNavigate,
-    useBlockAnalytics,
   };
 }

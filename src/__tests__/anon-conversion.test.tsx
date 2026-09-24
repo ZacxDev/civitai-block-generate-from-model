@@ -16,15 +16,15 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockViewer,
   getMockSpies,
   generate,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 // Import AFTER the mock is registered so the App picks up the stubs.
 import { App, resolveParentOrigin } from '../App';
@@ -32,7 +32,7 @@ import { App, resolveParentOrigin } from '../App';
 let postMessageSpy: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
   // The block targets the embedding page's origin (document.referrer) for the
   // REQUEST_SIGN_IN postMessage. jsdom has no referrer by default; stub one so
   // the resolved targetOrigin is a real origin (and assert it's used).

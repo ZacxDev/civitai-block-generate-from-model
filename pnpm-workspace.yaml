@@ -19,3 +19,19 @@ packages:
 # only ever ran in CI could never have caught a missing entry here.
 allowBuilds:
   esbuild: true
+
+# There is deliberately no `minimumReleaseAgeExclude` block here. pnpm 11's 24h
+# supply-chain waiting period applies to every entry in the lockfile, `@civitai/sdk`
+# included, and `pnpm install --frozen-lockfile` passes under it unmodified.
+#
+# An earlier revision of this file carried an exemption for `@civitai/sdk@0.2.0` that
+# never had any effect: 0.2.0 was published 2026-09-23T03:49:30Z, so its window shut
+# at 2026-09-24T03:49:30Z — and the commit that added the exemption was authored
+# 2026-09-24T03:56:34Z, seven minutes later. It was copied from `civitai-app-requests`
+# without re-reading the clock. Removed rather than left as a no-op that would
+# misstate which packages this repo exempts.
+#
+# The lesson, if a future `@civitai/*` bump ever does trip the gate: check the
+# publish timestamp first (`npm view <pkg> time`). The wait is hours, not days, and
+# an exemption written after the window has already closed is dead config on arrival.
+# CLAUDE.md covers the case where one is genuinely needed.

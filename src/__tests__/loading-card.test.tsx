@@ -15,9 +15,9 @@ import userEvent from '@testing-library/user-event';
  * in-flight window.
  */
 
-vi.mock('@civitai/blocks-react', async () => {
-  const { blocksReactMockFactory } = await import('../test/test-utils');
-  return blocksReactMockFactory();
+vi.mock('../platform/index.js', async () => {
+  const { platformMockFactory } = await import('../test/test-utils');
+  return platformMockFactory();
 });
 
 import { App } from '../App';
@@ -25,13 +25,13 @@ import {
   generate,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockWorkflow,
 } from '../test/test-utils';
 import { waitFor } from '@testing-library/react';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('In-flight loading card (results carousel)', () => {
