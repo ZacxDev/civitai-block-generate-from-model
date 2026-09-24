@@ -7,11 +7,10 @@ import { describe, expect, it } from 'vitest';
 /**
  * 🔴 THE PORT'S CLOSING CONDITION, MADE MECHANICAL.
  *
- * This block used to reach civitai through `@civitai/blocks-react`, the
- * postMessage bridge package. It now reaches it through `@civitai/sdk` over the
- * public `/api/v1/blocks/*` REST routes, and everything platform-shaped lives
- * behind `src/platform/` — which is the ONLY directory allowed to name
- * `@civitai/sdk`.
+ * This block used to reach civitai through the blocks-react bridge package,
+ * over postMessage. It now reaches it through `@civitai/sdk` over the public
+ * `/api/v1/blocks/*` REST routes, and everything platform-shaped lives behind
+ * `src/platform/` — which is the ONLY directory allowed to name `@civitai/sdk`.
  *
  * Both halves matter and they fail in opposite directions:
  *
@@ -83,11 +82,11 @@ describe('platform seam', () => {
     expect(files).toContain(join('platform', 'workflows.ts'));
   });
 
-  it('has no importer of @civitai/blocks-react left anywhere in src', () => {
+  it('has no importer of the bridge package left anywhere in src', () => {
     expect(importersOf('@civitai/blocks-react')).toEqual([]);
   });
 
-  it('does not list @civitai/blocks-react as a dependency', () => {
+  it('does not list the bridge package as a dependency', () => {
     const pkg = JSON.parse(readFileSync(PKG, 'utf8')) as Record<
       string,
       Record<string, string> | unknown

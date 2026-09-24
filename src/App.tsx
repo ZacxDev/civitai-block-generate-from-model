@@ -2,10 +2,10 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { CSSProperties, RefObject } from 'react';
 
 // The platform seam (`src/platform/`) — the only directory that imports
-// `@civitai/sdk`. These names and signatures are the ones `@civitai/blocks-react`
-// exported, kept deliberately so this file changed at its import block rather
-// than throughout when the block moved off the postMessage bridge onto the
-// public `/api/v1/blocks/*` REST routes.
+// `@civitai/sdk`. These names and signatures are the ones the blocks-react
+// bridge package exported, kept deliberately so this file changed at its import
+// block rather than throughout when the block moved off the postMessage bridge
+// onto the public `/api/v1/blocks/*` REST routes.
 import {
   useBlockContext,
   useBlockResize,
@@ -164,11 +164,14 @@ export function resolveParentOrigin(referrer: string | undefined): string {
 }
 
 /**
- * Raw postMessage of the SDK REQUEST_SIGN_IN envelope. Deliberately NOT routed
- * through an SDK hook so this works without waiting on a `@civitai/blocks-react`
- * npm publish (the new `useRequestSignIn` helper produces the identical wire
- * message). The host's IframeHost honors this only after BLOCK_READY and from
- * the pinned origin. `returnUrl` is optional; the host defaults it to the
+ * Raw postMessage of the SDK REQUEST_SIGN_IN envelope.
+ *
+ * Kept raw after the `@civitai/sdk` port rather than routed through
+ * `app.host.requestSignIn()`, which emits the IDENTICAL wire message: this one
+ * is synchronous and needs no initialised client, so the signed-out CTA still
+ * works in the window before — or entirely without — a handshake, which is
+ * exactly the state an anonymous viewer is in. The host's IframeHost honors it
+ * only after BLOCK_READY and from the pinned origin. `returnUrl` is optional; the host defaults it to the
  * current page and sanitises it to a same-origin path.
  */
 export function postRequestSignIn(payload?: { returnUrl?: string }): void {
@@ -872,13 +875,14 @@ export function App() {
     })
       .then((snap) => {
         if (myId !== estimateInFlightRef.current) return;
-        // 🔴 A FAILED estimate no longer arrives here. Up to
-        // @civitai/blocks-react 0.5.x `estimate()` RESOLVED a failure snapshot
-        // and left the hook's `error` null, so this branch handled it. From
-        // 0.44.x it THROWS `WorkflowEstimateError` instead, so failures land in
-        // `.catch` below and the old `status === 'failed'` arm here was dead
-        // code sitting under a comment that said the opposite. Kept as a
-        // defensive no-cost guard only.
+        // 🔴 A FAILED estimate no longer arrives here. Up to blocks-react 0.5.x
+        // `estimate()` RESOLVED a failure snapshot and left the hook's `error`
+        // null, so this branch handled it; from 0.44.x it THREW
+        // `WorkflowEstimateError` instead, and `src/platform/workflows.ts` keeps
+        // that contract across the REST port (a `status:'failed'` reply and a
+        // non-2xx both reject). So failures land in `.catch` below and the old
+        // `status === 'failed'` arm here was dead code sitting under a comment
+        // that said the opposite. Kept as a defensive no-cost guard only.
         const cost = snap.cost?.total;
         // eslint-disable-next-line no-console
         console.debug('[gfm] estimate resolved', { attempt: myId, cost });
@@ -2851,8 +2855,8 @@ function StyleSheet() {
  * Which theme to paint with BEFORE BLOCK_INIT lands.
  *
  * `useBlockContext().theme` is NOT usable here: the SDK's pre-init snapshot
- * hardcodes `theme: 'light'` (@civitai/blocks-react internal/transport.ts),
- * so it is a sentinel, not a signal — honouring it paints every viewer white
+ * hardcodes `theme: 'light'` (`EMPTY_SNAPSHOT` in `@civitai/sdk`'s
+ * core/transport.ts), so it is a sentinel, not a signal — honouring it paints every viewer white
  * for the ~100ms until the host's real theme arrives.
  *
  * That matters because index.html now ships a static shimmer skeleton that
@@ -2873,22 +2877,24 @@ function bootThemeGuess(): 'dark' | 'light' {
     //    React's first render agrees with the pixels already on screen: it is
     //    the same value, not an independent re-derivation that could differ.
     //
-    //    (Since blocks-react 0.44 the SDK's own transport also seeds its
-    //    snapshot from the fragment before React renders, so `theme` from
-    //    useBlockContext() is ALSO the host's answer when a fragment exists —
+    //    (The SDK's own transport also seeds its snapshot from the fragment
+    //    before React renders — true of blocks-react from 0.44 and of
+    //    `@civitai/sdk` today — so `theme` from useBlockContext() is ALSO the
+    //    host's answer when a fragment exists —
     //    but it stays the `'light'` sentinel when one does not, and this
     //    function must be right in both cases. Reading what was painted is.)
     //
     //    🔴 DO NOT "simplify" this to `parseBlockInitFragment(location.hash)`.
     //    It was written that way first and it is WRONG, silently: the SDK's own
-    //    iframeTransport reads the fragment during its init and then STRIPS it
-    //    from the URL (`stripBlockInitFragment` + `history.replaceState`,
-    //    blocks-react internal/iframeTransport.js). That init runs before this
-    //    component renders, so by here the hash is already empty and the read
-    //    falls through to the OS guess — producing exactly the dark→light
-    //    repaint this function exists to prevent. Measured in a real browser;
-    //    a jsdom test cannot see it, because mocking @civitai/blocks-react
-    //    means the transport never runs and never strips.
+    //    IframeTransport reads the fragment during its init and then STRIPS it
+    //    from the URL (`stripBlockInitFragment` + `history.replaceState`;
+    //    re-read in `@civitai/sdk` at core/transports/iframe-transport.ts:197-221
+    //    during the port, so the hazard survived the transport swap). That init
+    //    runs before this component renders, so by here the hash is already
+    //    empty and the read falls through to the OS guess — producing exactly
+    //    the dark→light repaint this function exists to prevent. Measured in a
+    //    real browser; a jsdom test cannot see it, because mocking the platform
+    //    seam means the transport never runs and never strips.
     const painted = document.documentElement.getAttribute('data-civitai-boot-theme');
     if (painted === 'dark' || painted === 'light') return painted;
 

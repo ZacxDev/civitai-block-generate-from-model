@@ -9,8 +9,8 @@
  * through the setter functions below.
  *
  * 🔴 THE SEAM MOVED, AND THAT IS WHY THIS FILE STILL LOOKS THE SAME. Before the
- * `@civitai/sdk` port these mocks stood in for `@civitai/blocks-react`, an
- * external package. They now stand in for `src/platform/`, which is OURS — so
+ * `@civitai/sdk` port these mocks stood in for the blocks-react bridge package,
+ * an external package. They now stand in for `src/platform/`, which is OURS — so
  * these tests no longer touch the transport at all, and NOTHING here is evidence
  * about how the platform layer talks to the server. That is covered separately,
  * against a fake HTTP server, in `src/__tests__/platform-*.test.ts`. Read the

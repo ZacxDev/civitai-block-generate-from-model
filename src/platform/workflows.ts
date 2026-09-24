@@ -35,9 +35,9 @@ const BASE = 'blocks/workflows';
  * Terminal workflow statuses — a workflow in one of these will never move
  * again, so a watcher stops.
  *
- * Spelled here rather than imported because `@civitai/blocks-react` owned the
- * old copy and this port removes that dependency. The set is the server's:
- * `TERMINAL_BLOCK_WORKFLOW_STATUSES` in `civitai/civitai`.
+ * Spelled here rather than imported because the blocks-react bridge package
+ * owned the old copy and this port removes that dependency. The set is the
+ * server's: `TERMINAL_BLOCK_WORKFLOW_STATUSES` in `civitai/civitai`.
  */
 export const TERMINAL_STATUSES: ReadonlySet<string> = new Set([
   'succeeded',
@@ -71,9 +71,9 @@ export type WorkflowSubmitErrorCode = 'exception' | 'workflow-failed';
  * because the estimate ERRORED, or because it came back without a numeric
  * `cost.total`.
  *
- * Ported from `@civitai/blocks-react` unchanged in shape and in meaning, because
- * `App.tsx` branches on `err instanceof WorkflowEstimateError` and on
- * `err.code`. Those two reads are the contract; this class exists to keep them
+ * Ported from the blocks-react bridge package unchanged in shape and in
+ * meaning, because `App.tsx` branches on `err instanceof WorkflowEstimateError`
+ * and on `err.code`. Those two reads are the contract; this class exists to keep them
  * true across the transport swap.
  *
  * - `'failed'`  — the reply's `status` is `'failed'`. Either the procedure threw

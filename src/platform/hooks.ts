@@ -1,6 +1,6 @@
 // The hooks the block calls, rebound onto `@civitai/sdk`.
 //
-// These keep the SIGNATURES the `@civitai/blocks-react` hooks had, so the port
+// These keep the SIGNATURES the blocks-react bridge package's hooks had, so the port
 // is a change of transport rather than a rewrite of 3,400 lines of block logic:
 // `App.tsx` changed at its import block, not throughout. Each one is a thin
 // adapter; the interesting code is in `workflows.ts` and `buzz.ts`.

@@ -380,7 +380,7 @@ describe("the boot theme comes from the HOST's fragment, not a guess", () => {
     // wrong in a way no mocked test can see: the SDK's own iframeTransport
     // reads the fragment during init and then STRIPS it from the URL
     // (stripBlockInitFragment + history.replaceState), and that init runs
-    // BEFORE this component renders. Mocking @civitai/blocks-react means the
+    // BEFORE this component renders. Mocking the platform seam means the
     // transport never runs, so the hash survives in tests and the re-parse
     // looked correct — while the real browser showed dark-then-light.
     //
