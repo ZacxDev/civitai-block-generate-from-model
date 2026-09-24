@@ -400,9 +400,19 @@ export interface UseCheckpointPicker {
  *
  *    So: a checkpoint swap still applies immediately and lasts the session (the
  *    block's own `localCheckpoint`), and is LOST on remount, falling back to the
- *    publisher default. It resolves rather than rejects deliberately — rejecting
- *    would fire the call site's rollback and show an error banner on every
- *    swap, which is a worse regression than losing cross-session persistence.
+ *    publisher default. It resolves rather than rejects deliberately: nothing
+ *    failed — the platform simply has no surface to write to — and a rejection
+ *    would read as an error on every swap.
+ *
+ *    🔴 IT CANNOT REJECT. In a production build `import.meta.env.DEV` is false
+ *    and the body is empty, so the promise always fulfils. The call site
+ *    (`handleChangeCheckpoint` in `src/App.tsx`) therefore has NO rollback
+ *    branch around it — a `catch` there would be unreachable code reading as
+ *    "persistence failure is handled" while no persistence is attempted. What
+ *    the viewer gets instead is a quiet, always-reachable note under the
+ *    checkpoint row in the Advanced section saying the choice lasts the session
+ *    only. If this ever becomes a real request that can reject, the call site
+ *    must grow a failure path — and a test that reaches it — at the same time.
  */
 export function useCheckpointPicker(): UseCheckpointPicker {
   const open = useCallback(

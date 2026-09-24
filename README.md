@@ -93,8 +93,15 @@ feature:
    request and there is **no REST route for block user settings**. A swap still applies
    immediately and lasts the session, then falls back to the publisher default on
    remount. `useCheckpointPicker().persist` is a documented no-op rather than a
-   rejection, because rejecting would fire the call site's rollback and show an error
-   banner on every swap.
+   rejection: nothing failed, so an error on every swap would be a lie.
+
+   **The viewer is told, in the UI.** After a swap, the Advanced section renders a
+   quiet note under the checkpoint row — *"Applies to this session only — reloading
+   the block restores the default checkpoint."* — in the subtle-text style, not the
+   error style. A README is not a UI; this gap is surfaced at the seam it degrades.
+   Because `persist` cannot reject, the call site carries **no** rollback/`catch`
+   around it — dead code there would have read as "persistence failure is handled"
+   while no persistence happens at all.
 
 3. **Two smaller ones.** The Checkpoint picker can no longer pre-highlight the current
    selection (`OPEN_RESOURCE_PICKER` takes no `currentVersionId`), and
