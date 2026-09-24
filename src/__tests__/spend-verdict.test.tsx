@@ -30,19 +30,19 @@ import { act, fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   getMockBuzzBalance,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockBuzzBalance,
   setMockBuzzBalanceRefetch,
   setMockSettings,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
-import { WorkflowEstimateError, WorkflowSubmitError } from '@civitai/blocks-react';
+import { WorkflowEstimateError, WorkflowSubmitError } from '../platform/index.js';
 
 import { App } from '../App';
 
@@ -60,7 +60,7 @@ const freezeEstimate = () =>
   getMockSpies().estimate.mockImplementation(() => new Promise(() => {}));
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('F1 — a charged job that then failed is never re-classified by its own debit', () => {

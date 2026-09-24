@@ -30,19 +30,19 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockContext,
   setMockViewer,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Iframe resize structural fix (Tier-4 Delta A)', () => {

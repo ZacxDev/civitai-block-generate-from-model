@@ -17,21 +17,21 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   generate,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockSettings,
   setMockWorkflow,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Sticky cost on the in-flight carousel LoadingCard', () => {

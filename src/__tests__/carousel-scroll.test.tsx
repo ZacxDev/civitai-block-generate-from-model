@@ -15,17 +15,17 @@ import { act, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Carousel scroll + compact thumbs (delta #9)', () => {

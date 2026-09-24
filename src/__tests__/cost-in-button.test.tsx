@@ -11,20 +11,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   generate,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
 } from '../test/test-utils';
 import userEvent from '@testing-library/user-event';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Cost inside the Generate button (delta #1)', () => {
@@ -91,7 +91,7 @@ describe('Cost inside the Generate button (delta #1)', () => {
     // throws, so the fake can no longer be wrong in the same direction as the
     // code.
     const { getMockSpies } = await import('../test/test-utils');
-    const { WorkflowEstimateError } = await import('@civitai/blocks-react');
+    const { WorkflowEstimateError } = await import('../platform/index.js');
     getMockSpies().estimate.mockReset();
     getMockSpies().estimate.mockRejectedValue(
       new WorkflowEstimateError(
@@ -134,7 +134,7 @@ describe('Cost inside the Generate button (delta #1)', () => {
     // Two codes, two meanings: 'failed' is the service refusing, 'no-cost' is a
     // reply with no price. Collapsing them loses the only actionable half.
     const { getMockSpies } = await import('../test/test-utils');
-    const { WorkflowEstimateError } = await import('@civitai/blocks-react');
+    const { WorkflowEstimateError } = await import('../platform/index.js');
     getMockSpies().estimate.mockReset();
     getMockSpies().estimate.mockRejectedValue(
       new WorkflowEstimateError({ workflowId: 'w', status: 'succeeded' } as never, 'no-cost')

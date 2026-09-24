@@ -11,18 +11,18 @@ import { fireEvent, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
 import { App } from '../App';
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
 });
 
 describe('Prompt textarea (Tier-3 #9)', () => {

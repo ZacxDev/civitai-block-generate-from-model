@@ -11,18 +11,18 @@ import { screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 
 import {
-  blocksReactMockFactory,
+  platformMockFactory,
   getMockSpies,
   renderApp,
-  resetBlocksReactMock,
+  resetPlatformMock,
   setMockBuzzBalance,
   setMockSettings,
   setMockWorkflow,
 } from '../test/test-utils';
 
-vi.mock('@civitai/blocks-react', () => blocksReactMockFactory());
+vi.mock('../platform/index.js', () => platformMockFactory());
 
-import { WorkflowEstimateError } from '@civitai/blocks-react';
+import { WorkflowEstimateError } from '../platform/index.js';
 
 import { App } from '../App';
 
@@ -60,7 +60,7 @@ const refuseEstimateWith = (snap: Record<string, unknown>) => {
 };
 
 beforeEach(() => {
-  resetBlocksReactMock();
+  resetPlatformMock();
   // 🔴 THIS FILE'S SUBJECT IS THE MONEY CTA, and the CTA now requires a KNOWN
   // balance that does not cover the quoted price — a top-up only fixes an
   // affordability problem, and "we don't know the balance" is not one (the mock
