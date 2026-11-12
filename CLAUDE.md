@@ -24,6 +24,8 @@ file) and the invariants that must never regress are the money ones:
 
 The 🔴 comments in `src/App.tsx` are the incident log for that path. Read them
 before touching it — several of them record a theory that was *retracted*.
+Past bugs in this block's own queue, cost estimate and theming, each with its
+cause and the rule it left, are in [`docs/gotchas.md`](./docs/gotchas.md).
 
 This repo is a **public OSS mirror** and a dogfood of the external-developer
 experience: it builds outside the platform monorepo against the *published*
